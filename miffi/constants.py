@@ -1,6 +1,6 @@
 # **************************************************************************
 # *
-# * Authors:     you (you@yourinstitution.email)
+# * Authors:    Scipion Team (scipion@cnb.csic.es)
 # *
 # * your institution
 # *
@@ -24,7 +24,16 @@
 # *
 # **************************************************************************
 
-V1 = "1.0"
 
-MYPLUGIN_BINARY = "MYPLUGIN_BINARY"
-MYPLUGIN_HOME = "MYPLUGIN_HOME"
+def getMiffiEnvName(version):
+    return "miffi-%s" % version
+
+V1_0_0 = "1.0.0" # MIFFI VERSION
+VERSIONS = [V1_0_0]
+MIFFI_DEFAULT_VER_NUM = V1_0_0
+MIFFI_PIP_PACKAGE = "miffi"
+DEFAULT_ENV_NAME = getMiffiEnvName(MIFFI_DEFAULT_VER_NUM)
+DEFAULT_ACTIVATION_CMD = 'conda activate ' + DEFAULT_ENV_NAME
+MIFFI_ENV_ACTIVATION = 'MIFFI_ENV_ACTIVATION'
+MIFFI_MODELS = "miffi-models"
+MIFFI_HOME = 'MIFFI_HOME'

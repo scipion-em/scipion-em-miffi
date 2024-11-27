@@ -11,7 +11,7 @@ from setuptools import setup, find_packages
 from codecs import open
 from os import path
 
-from myplugin import __version__
+from miffi import __version__
 
 here = path.abspath(path.dirname(__file__))
 
@@ -28,12 +28,12 @@ with open('requirements.txt') as f:
 setup(
     name='scipion-em-miffi',  # Required
     version=__version__,  # Required
-    description='Scipion plugin for miffi software.',  # Required
+    description='Scipion plugin: a python wrapper to use miffi software within Scipion.',  # Required
     long_description=long_description,  # Optional
-    url='https://github.com/scipion-em/scipion-em-myplugin',  # Optional
-    author='you',  # Optional
-    author_email='you@yourinstitution.email',  # Optional
-    keywords='scipion cryoem imageprocessing scipion-3.0',  # Optional
+    url='https://github.com/scipion-em/scipion-em-miffi',  # Optional
+    author='ando-lab',  # Optional
+    author_email='da.marchan@cnb.csic.es',  # Optional
+    keywords='scipion cryoem image processing scipion-3.0',  # Optional
     classifiers=[  # Optional
         'Development Status :: 3 - Alpha',
         'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
