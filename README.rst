@@ -1,101 +1,78 @@
-=======================
-Scipion template plugin
-=======================
+=================
+Miffi plugin
+=================
 
-This is a template plugin for **scipion**
+This plugin provides a wrapper for `miffi <https://github.com/ando-lab/miffi?tab=readme-ov-file>`_ software tools for automatic micrograph assessment.
 
-==========================
-Steps to adapt this plugin
-==========================
+Miffi: Cryo-EM micrograph filtering utilizing Fourier space information
 
-IMPORTANT: To simplify the instructions all the commands would refer to an hypothetical new plugin name called "coolem".
-Note that you must replace "coolem" by your plugin name.
 
-**Clone it:**
 
-.. code-block::
+Installation
+-------------
 
-    git clone https://github.com/scipion-em/scipion-em-template.git scipion-em-coolem
+You will need to use 3.0+ version of Scipion to be able to run these protocols. To install the plugin, you have two options:
 
-**Reset the git repo**
+a) Stable version
 
 .. code-block::
 
-    cd scipion-em-coolem
-    rm -rf .git
-    git init
+   scipion installp -p scipion-em-miffi
 
-**Empty CHANGES.txt**
+b) Developer's version
 
-.. code-block::
+   * download repository
 
-    rm CHANGES.txt && touch CHANGES.txt
+    .. code-block::
 
-**Rename "myplugin" to coolem**
+        git clone -b devel https://github.com/scipion-em/scipion-em-miffi.git
 
-.. code-block::
+   * install
 
-    mv myplugin coolem
-    
+    .. code-block::
 
-**Tidy up imports**
+       scipion installp -p /path/to/scipion-em-miffi --devel
 
- IDE refactorization should rename at once the classes and the imports. Search in your IDE for "myplugin" and replace by *"coolem"*
+miffi software will be installed automatically with the plugin but you can also use an existing installation by providing *miffi_ENV_ACTIVATION* (see below).
+You also have to download training models separately (see below).
 
-- coolem/protocols/protocol_hello_world.py:
- class MyPluginPrefixHelloWorld --> class CoolemPrefixHelloWorld
+**Important:** you need to have conda (miniconda3 or anaconda3) pre-installed to use this program.
 
-- coolem/protocol/__init__.py:
- from .protocol_hello_world import MyPluginPrefixHelloWorld --> from .protocol_hello_world import CoolemPrefixHelloWorld
+Configuration variables
+-----------------------
 
-- coolem/wizards/wizard_hello_world.py:
- _targets = [(MyPluginPrefixHelloWorld, ['message'])]  -->     _targets = [(CoolemPrefixHelloWorld, ['message'])]
- class MyPluginPrefixHelloWorldWizard --> class CoolemPrefixHelloWorldWizard
+*CONDA_ACTIVATION_CMD*: If undefined, it will rely on conda command being in the
+PATH (not recommended), which can lead to execution problems mixing scipion
+python with conda ones. One example of this could can be seen below but
+depending on your conda version and shell you will need something different:
+CONDA_ACTIVATION_CMD = eval "$(/extra/miniconda3/bin/conda shell.bash hook)"
 
-- coolem/wizards/__init__.py:
- from .wizard_hello_world import MyPluginPrefixHelloWorldWizard  --> from .wizard_hello_world import CoolemPrefixHelloWorldWizard
+*MIFFI_ENV_ACTIVATION* (default = conda activate miffi-1.0.0):
+Command to activate the miffi environment.
 
-- protocols.conf: rename MyPluginPrefixHelloWorld --> CoolemPrefixHelloWorld
+The deep-learning models can be downloaded from
+`authors' website <https://cosmic-cryoem.org/software/cryo-assess/>`_ and the folder with models is set with:
 
+*MIFF_MODELS* (default = software/em/miffi-models)
 
-- setup.py: Update almost all values: name, description, ... Be sure to update package data
-.. code-block::
+Verifying
+---------
 
-    package_data={  # Optional
-       'coolem': ['icon.png', 'protocols.conf'],
-    }
+To check the installation, simply run the following Scipion test:
 
-  and the entry point
-.. code-block::
+``scipion test miffi.tests.test_protocols_miffi.TestMiffi``
 
-    entry_points={
-        'pyworkflow.plugin': 'coolem = coolem'
-    }
+Supported versions
+------------------
 
-**Install the plugin in devel mode**
+1.0.0
 
-.. code-block::
+Protocols
+----------
 
-    scipion3 installp -p /home/me/scipion-em-coolem --devel
+* categorize micrographs
 
-If installation fails, you can access pip options like:
+References
+-----------
 
-.. code-block::
-
-    scipion3 python -m pip ... (list, install, uninstall)
-    
-
-**Customize it**
-
-Replace icon.png with your logo and update the bibtex.py with your reference.
-
-Get rid of this content and keep the readme informative
-
-
-**Repository**
-
-To create the repository, following those guide depending the platform:
-
-- GitHub: https://docs.github.com/en/get-started/quickstart/create-a-repo
-- GitLab https://docs.gitlab.com/ee/user/project/repository/
-- Bitbucket https://support.atlassian.com/bitbucket-cloud/docs/create-a-git-repository/
+1. High-Throughput Cryo-EM Enabled by User-Free Preprocessing Routines. Yilai Li, Jennifer N.Cash, John J.G. Tesmer, Michael A.Cianfrocco. Structure 2020, Volume 28 (7), Pages 858-869.e3

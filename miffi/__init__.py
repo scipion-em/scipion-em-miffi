@@ -26,12 +26,13 @@
 
 import pyworkflow.utils as pwutils
 import pwem
+import os
 
 from miffi.constants import *
 
 __version__ = "0.1"  # plugin version
 _logo = "icon.png"
-_references = ['miffiRef']
+#_references = ['miffiRef']
 
 
 class Plugin(pwem.Plugin):
@@ -44,6 +45,8 @@ class Plugin(pwem.Plugin):
     def _defineVariables(cls):
         cls._defineVar(MIFFI_ENV_ACTIVATION, DEFAULT_ACTIVATION_CMD)
         cls._defineEmVar(MIFFI_HOME, f"miffi-{MIFFI_DEFAULT_VER_NUM}")
+        models_home = os.path.join(cls.getVar(MIFFI_HOME), MIFFI_MODELS)
+        cls._defineVar(MIFFI_MODELS, models_home)
 
     @classmethod
     def getMiffiEnvActivation(cls):
@@ -91,7 +94,7 @@ class Plugin(pwem.Plugin):
 
         installCmd.append('&& pip install %s' % MIFFI_PIP_PACKAGE)
 
-        models_home = os.path.join(cls.getVar(MIFFI_HOME), MIFFI_MODELS)
+        models_home = cls.getVar(MIFFI_MODELS)
         pwutils.makePath(models_home)
         # install models
         installCmd.append('&& %s download -d %s' % (MIFFI_PIP_PACKAGE, models_home))

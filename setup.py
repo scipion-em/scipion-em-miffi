@@ -42,8 +42,8 @@ setup(
     packages=find_packages(),
     install_requires=[requirements],
     project_urls={  # Optional
-        'Bug Reports': 'https://github.com/scipion-em/scipion-em-template/issues',
-        'Source': 'https://github.com/scipion-em/scipion-em-template/',
+        'Bug Reports': 'https://github.com/scipion-em/scipion-em-miffi/issues',
+        'Source': 'https://github.com/scipion-em/scipion-em-miffi/',
     },
     entry_points={'pyworkflow.plugin': 'miffi = miffi'},
     package_data={  # Optional
