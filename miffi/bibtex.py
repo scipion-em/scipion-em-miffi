@@ -1,9 +1,8 @@
-# -*- coding: utf-8 -*-
 # **************************************************************************
 # *
-# * Authors:     you (you@yourinstitution.email)
+# * Authors:     Daniel Marchan (da.marchan@cnb.csic.es)
 # *
-# * your institution
+# * Spanish National Center for Biotechnology
 # *
 # * This program is free software; you can redistribute it and/or modify
 # * it under the terms of the GNU General Public License as published by
@@ -26,18 +25,17 @@
 # **************************************************************************
 
 """
-@article{you2019,
-title = "Title of your paper ",
-journal = "...",
-volume = "...",
+@article{DaXu2024,
+title = "Miffi: Improving the accuracy of CNN-based cryo-EM micrograph filtering with fine-tuning and Fourier space information",
+journal = "Journal of Structural Biology",
+volume = "216",
 number = ".",
-pages = "1 - 6",
-year = "2019",
-issn = "0000-1111",
-doi = "https://dx.doi.org/xxxxx/xxxxx",
-url = "https://www.url",
-author = "you and your team",
-keywords = "Single particle analysis Tomography",
+pages = "-",
+year = "2024",
+issn = "",
+doi = "https://doi.org/10.1016/j.jsb.2024.108072",
+url = "https://github.com/ando-lab/miffi?tab=readme-ov-file",
+author = "Da Xu and Ando-Lab",
+keywords = "Cryo-EM micrograph filtering utilizing Fourier space information",
 }
-
 """

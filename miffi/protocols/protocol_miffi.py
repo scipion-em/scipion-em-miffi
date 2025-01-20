@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 # **************************************************************************
 # *
 # * Authors:     Daniel Marchan (da.marchan@cnb.csic.es)
@@ -30,9 +29,13 @@ Describe your python module here:
 This module will provide Miffi software: Cryo-EM micrograph filtering utilizing Fourier space information
 """
 import os
+import shutil
 from datetime import datetime
 import copy
 import time
+import pickle
+from pathlib import Path
+import re
 
 from pyworkflow.protocol import STEPS_PARALLEL
 import pyworkflow.protocol.params as params
@@ -50,7 +53,7 @@ OUTPUT_DISCARDED = 'outputMicrographsDiscarded'
 
 class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     """
-    Protocol to categorize micrographs
+    Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
     """
     _label = 'categorize micrographs'
     _devStatus = BETA
@@ -63,10 +66,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     # -------------------------- DEFINE param functions ----------------------
     def _defineParams(self, form):
-        """ Define the input parameters that will be used.
-        Params:
-            form: this is the form to be populated with sections and params.
-        """
         # You need a params to belong to a section:
         form.addSection(label=Message.LABEL_INPUT)
 
@@ -100,6 +99,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self.processedIds = [] # Ids to be register to output
+        self.outputCategorizeFiles = []
+        self.outputCategorizeLogFiles = []
+        self.outputLog = {}
         self.counterBatch = 1
         self.isStreamClosed = self.inputSet.get().isStreamClosed()
         # Contains images that have been processed in a Step (checkNewOutput).
@@ -172,7 +174,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
         allDone = len(doneListIds) + len(newDone)
         maxSize = self._loadInputSet(self.inputFn).getSize()
-
         # We have finished when there is not more input images
         # (stream closed) or when the limit of output size is met
         self.finished = self.isStreamClosed and allDone == maxSize
@@ -184,14 +185,55 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             # so we exit from the function here
             return
 
+        # Miffi program
+        outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
+        outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
+        self.outputCategorizeFiles = []  # These mics are already registered
+        self.outputCategorizeLogFiles = []
         inputSet = self._loadInputSet(self.inputFn)
-        outputSet = self._loadOutputSet(self._inputClass, self._baseName)
+
+        # Initialize combined lists
+        all_good = []
+        all_bad = []
+
+        for pkl_files in outputCategorizeFiles:
+            with open(pkl_files, 'rb') as file:
+                data = pickle.load(file)
+                # Check for the presence of 'good_high_conf' and 'good_low_conf' and extract file names
+                if 'good' in data:
+                    all_good.extend([Path(path).name for path in data['good']])
+
+                if 'bad_single' in data:
+                    all_bad.extend([Path(path).name for path in data['bad_single']])
+
+                if 'bad_multiple' in data:
+                    all_bad.extend([Path(path).name for path in data['bad_multiple']])
+
+        if all_good:
+            outputSet = self._loadOutputSet(self._inputClass, self._baseName)
+
+        if all_bad:
+            outputSetDiscarded = self._loadOutputSet(SetOfMicrographs, 'micrograph' + 'DISCARDED' + '.sqlite')
 
         for imageId in newDone:
             image = inputSet.getItem("id", imageId).clone()
-            outputSet.append(image)
+            micName = os.path.basename(image.getFileName())
+            if micName in all_good:
+                outputSet.append(image)
+            if micName in all_bad:
+                outputSetDiscarded.append(image)
 
-        self._updateOutputSet(OUTPUT, outputSet, streamMode)
+        if all_good:
+            self._updateOutputSet(OUTPUT, outputSet, streamMode)
+
+        if all_bad:
+            self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+
+        # Summary log and display the results
+        outputLogTmp = populate_and_update_categories(self.outputLog, outputCategorizeLogFiles)
+        dict_str = '\n'.join(f'{k}: {v}' for k, v in outputLogTmp.items())
+        self.summaryVar.set(dict_str)
+        self.outputLog  = outputLogTmp
 
         if self.finished:  # Unlock createOutputStep if finished all jobs
             outputStep = self._getFirstJoinStep()
@@ -242,24 +284,25 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def miffStep(self, newIds, counterBatch):
         """ Call miff with the appropriate parameters. """
+        batchDirTmp = self.prepareBatch(newIds, counterBatch)
+        try:
+            inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
+            categorize_output_file, categorize_output_log_file  = self.runMiffiCategorize(counterBatch, inference_output_file)
+            self.outputCategorizeFiles.append(categorize_output_file)
+            self.outputCategorizeLogFiles.append(categorize_output_log_file)
+        except Exception as e:
+            self.info('Batch number %d had problems with miffi execution' % counterBatch)
+            self.info(e)
 
-        print('Hello miffi')
-        directoryBatch = self.prepareBatch(newIds, counterBatch)
-        print(directoryBatch)
-
-        inference_output_file = self.runMiffiInference(counterBatch)
-        self.runMiffiCategorize(counterBatch, inference_output_file)
-
-
-        #self.appendTotalOutputStar(numPass)
-        #self.copyMiffiOutput(numPass)
         self.processedIds.extend(newIds)
+        # To have a control in the size of the protocol
+        self.deleteBatch(batchDirTmp)
 
         if not self.isStreamClosed:
             self.delayRegister()
 
     def prepareBatch(self, newIds, counterBatch):
-        batchDirTmp = self._getExtraPath('micBatch%d' % counterBatch)
+        batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
         makePath(batchDirTmp)
         inputMicSet = self._loadInputSet(self.inputFn)
         for micId in newIds:
@@ -267,8 +310,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             micName = mic.getFileName()
             micFnOrig = os.path.abspath(micName)
             micDest = os.path.join(batchDirTmp, os.path.basename(micName))
-            print(micFnOrig)
-            print(micDest)
             copyFile(micFnOrig, micDest)
 
         return batchDirTmp
@@ -276,39 +317,29 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     def copyMiffiOutput(self, numPass):
         copyTree(self._getTmpPath('output%s' % numPass), self._getExtraPath('MicAssess'))
 
-    def runMiffiInference(self, numPass):
-        cwd = self._getExtraPath('micBatch%d' % numPass)
-        args = ['inference '
-                '--micdir %s ' % cwd,
-                '-w %s ' % '*.mrc',
-                '--outname %s ' % os.path.join(cwd, 'file'),
-                '--g %(GPU)s ',
-                '-m %s' % Plugin.getVar(MIFFI_MODELS)
-                ]
-        params = ' '.join(args)
+    def runMiffiInference(self, batchDir, numPass):
+        outDir = self._getExtraPath('micBatch%d' % numPass)
+        makePath(outDir)
+        params = self._getInferenceParams(batchDir, outDir)
         program = Plugin.getProgram('miffi')
         self.runJob(program, params, env=Plugin.getEnviron(), numberOfThreads=1)
+        inference_output_file = find_file_with_ending(outDir, '.pkl')
 
-        inference_output_file = find_file_with_ending(cwd, '.pkl')
         return inference_output_file
 
-    def runMiffiCategorize(self, numPass, inference_output_file):
+    def runMiffiCategorize(self, numPass, inference_file):
         cwd = self._getExtraPath('micBatch%d' % numPass)
-        args = ['categorize '
-                '-t %s ' % 'list',
-                '-i %s ' % inference_output_file,
-                #'--csg %s ' % os.path.join(cwd, 'csgfile'),
-                '--sb ',
-                '--sc' # Split all categories into high and low confidence based on a cutoff value.
-                ]
-
-        params = ' '.join(args)
+        params = self._getCategorizeParams(inference_file)
         program = Plugin.getProgram('miffi')
         self.runJob(program, params, env=Plugin.getEnviron(), numberOfThreads=1)
 
+        categorize_output_file = find_file_with_ending(cwd, 'dict.pkl')
+        categorize_output_log_file = find_file_with_ending(cwd, '.log')
 
-    def deleteBatch(self):
-        pass
+        return categorize_output_file, categorize_output_log_file
+
+    def deleteBatch(self, tmpBatchDir):
+        shutil.rmtree(tmpBatchDir)
 
     def delayRegister(self):
         delay = self.streamingSleepOnWait.get()
@@ -334,21 +365,34 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         return doneIds, sizeOutput, acceptedIds, discardedIds
 
-    def _getArgs(self, numPass):
+    def _getInferenceParams(self, batchDir, outDir):
         """ Return the list of args for the command. """
-        args = ['-i %s ' % self._getExtraPath('micBatch%d' % numPass),
-                '-o output%s ' % numPass,
-                #'-m %s' % Plugin.getVar(CRYOASSESS_MODELS),
-                '-b %d' % self.batchSize.get(),
-                '--t1 %0.2f' % self.threshold.get(),
-                '--t2 %0.2f' % self.threshold2.get(),
-                '--threads %d' % self.numberOfThreads.get(),
-                '--gpus %(GPU)s']
+        args = ['inference '
+                '--micdir %s ' % batchDir,
+                '-w %s ' % '*.mrc',
+                '--outname %s ' % os.path.join(outDir, 'file'),
+                '--g %(GPU)s ',
+                '-m %s' % Plugin.getVar(MIFFI_MODELS)
+                ]
+        params = ' '.join(args)
+        return params
 
-        return args
+    def _getCategorizeParams(self, inference_file):
+        """ Return the list of args for the command. """
+        args = ['categorize '
+                '-t %s ' % 'list',
+                '-i %s ' % inference_file,
+                # '--csg %s ' % os.path.join(cwd, 'csgfile'),
+                '--sb ', # Split all singly bad micrographs into individual categories. If this argument is not used, only film and minor crystalline categories will be written.
+                #'--sc'  # Split all categories into high and low confidence based on a cutoff value.
+                ]
+        params = ' '.join(args)
+        return params
 
     def _summary(self):
-        pass
+        summary = []
+        summary.append(self.summaryVar.get())
+        return summary
 
     def _methods(self):
         methods = []
@@ -387,3 +431,16 @@ def find_file_with_ending(directory, ending):
     except Exception as e:
         print(f"An unexpected error occurred: {e}")
         return None
+
+def populate_and_update_categories(existing_totals, log_files):
+    for log_file_path in log_files:
+        with open(log_file_path, 'r') as file:
+            for line in file:
+                # Updated regex to match category name without dots
+                match = re.search(r'\)\s*([\w_]+)\.*\s*(\d+)', line)
+                if match:
+                    category = match.group(1)
+                    count = int(match.group(2))
+                    # Add new categories or update existing totals
+                    existing_totals[category] = existing_totals.get(category, 0) + count
+    return existing_totals

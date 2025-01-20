@@ -31,8 +31,8 @@ import os
 from miffi.constants import *
 
 __version__ = "0.1"  # plugin version
-_logo = "icon.png"
-#_references = ['miffiRef']
+_logo = "miffi_logo.png"
+_references = ['DaXu2024']
 
 
 class Plugin(pwem.Plugin):
