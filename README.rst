@@ -50,6 +50,8 @@ CONDA_ACTIVATION_CMD = eval "$(/extra/miniconda3/bin/conda shell.bash hook)"
 *MIFFI_ENV_ACTIVATION* (default = conda activate miffi-1.0.0):
 Command to activate the miffi environment.
 
+*MIFFI_MODELS* (default = software/em/miffi-1.0.0/miffi-models)
+
 Verifying
 ---------
 
