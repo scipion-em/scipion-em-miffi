@@ -4,7 +4,7 @@ Miffi plugin
 
 This plugin provides a wrapper for `miffi <https://github.com/ando-lab/miffi?tab=readme-ov-file>`_ software tools for automatic micrograph assessment.
 
-Miffi: Cryo-EM micrograph filtering utilizing Fourier space information
+**Miffi:** Cryo-EM micrograph filtering utilizing Fourier space information
 
 
 
