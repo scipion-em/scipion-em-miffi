@@ -50,11 +50,6 @@ CONDA_ACTIVATION_CMD = eval "$(/extra/miniconda3/bin/conda shell.bash hook)"
 *MIFFI_ENV_ACTIVATION* (default = conda activate miffi-1.0.0):
 Command to activate the miffi environment.
 
-The deep-learning models can be downloaded from
-`authors' website <https://cosmic-cryoem.org/software/cryo-assess/>`_ and the folder with models is set with:
-
-*MIFF_MODELS* (default = software/em/miffi-models)
-
 Verifying
 ---------
 
@@ -75,4 +70,5 @@ Protocols
 References
 -----------
 
-1. High-Throughput Cryo-EM Enabled by User-Free Preprocessing Routines. Yilai Li, Jennifer N.Cash, John J.G. Tesmer, Michael A.Cianfrocco. Structure 2020, Volume 28 (7), Pages 858-869.e3
+1. Da Xu, Nozomi Ando, Miffi: Improving the accuracy of CNN-based cryo-EM micrograph filtering with fine-tuning and Fourier space information, Journal of Structural Biology, Volume 216, Issue 2,
+2024,108072,ISSN 1047-8477,https://doi.org/10.1016/j.jsb.2024.108072.
