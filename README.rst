@@ -33,7 +33,7 @@ b) Developer's version
 
        scipion installp -p /path/to/scipion-em-miffi --devel
 
-miffi software will be installed automatically with the plugin but you can also use an existing installation by providing *miffi_ENV_ACTIVATION* (see below).
+miffi software will be installed automatically with the plugin but you can also use an existing installation by providing *MIFFI_ENV_ACTIVATION* (see below).
 You also have to download training models separately (see below).
 
 **Important:** you need to have conda (miniconda3 or anaconda3) pre-installed to use this program.
