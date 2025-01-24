@@ -32,7 +32,7 @@ setup(
     long_description=long_description,  # Optional
     url='https://github.com/scipion-em/scipion-em-miffi',  # Optional
     author='ando-lab',  # Optional
-    author_email='da.marchan@cnb.csic.es',  # Optional
+    author_email='scipion@cnb.csic.es',  # Optional
     keywords='scipion cryoem image processing scipion-3.0',  # Optional
     classifiers=[  # Optional
         'Development Status :: 3 - Alpha',
@@ -47,6 +47,7 @@ setup(
     },
     entry_points={'pyworkflow.plugin': 'miffi = miffi'},
     package_data={  # Optional
-       'miffi': ['icon.png', 'protocols.conf'],
-    }
+       'miffi': ['miffi_logo.png', 'protocols.conf'],
+    },
+    include_package_data=True
 )
