@@ -10,5 +10,5 @@ jobs:
   call-publish-workflow:
     uses: scipion-em/.github/.github/workflows/publish_and_tag.yml@master
     with:
-      folder: myplugin
+      folder: miffi
     secrets: inherit
