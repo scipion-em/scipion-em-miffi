@@ -30,7 +30,7 @@ import os
 
 from miffi.constants import *
 
-__version__ = "0.1"  # plugin version
+__version__ = "1.0.0"  # plugin version
 _logo = "miffi_logo.png"
 _references = ['DaXu2024']
 
