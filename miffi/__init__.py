@@ -30,7 +30,7 @@ import os
 
 from miffi.constants import *
 
-__version__ = "1.0.2"  # plugin version
+__version__ = "1.1.0"  # plugin version
 _logo = "miffi_logo.png"
 _references = ['DaXu2024']
 
@@ -39,14 +39,11 @@ class Plugin(pwem.Plugin):
     _pathVars = [MIFFI_MODELS]
     _url = "https://github.com/scipion-em/scipion-em-miffi"
     _supportedVersions = VERSIONS  # binary version
-    _homeVar = MIFFI_HOME
 
     @classmethod
     def _defineVariables(cls):
         cls._defineVar(MIFFI_ENV_ACTIVATION, DEFAULT_ACTIVATION_CMD)
-        cls._defineEmVar(MIFFI_HOME, f"miffi-{MIFFI_DEFAULT_VER_NUM}")
-        models_home = os.path.join(cls.getVar(MIFFI_HOME), MIFFI_MODELS)
-        cls._defineVar(MIFFI_MODELS, models_home)
+        cls._defineEmVar(MIFFI_MODELS, MIFFI_MODELS_DEFAULT)
 
     @classmethod
     def getMiffiEnvActivation(cls):
@@ -97,7 +94,7 @@ class Plugin(pwem.Plugin):
         models_home = cls.getVar(MIFFI_MODELS)
         pwutils.makePath(models_home)
         # install models
-        installCmd.append('&& %s download -d %s' % (MIFFI_PIP_PACKAGE, models_home))
+        installCmd.append('&& %s download -d %s' % (MIFFI_PIP_PACKAGE,  models_home))
 
         # Flag installation finished
         installCmd.append('&& touch %s' % MIFFI_INSTALLED)
@@ -122,11 +119,3 @@ class Plugin(pwem.Plugin):
                                        cls.getMiffiEnvActivation(),
                                        program)
         return fullProgram
-
-    # @classmethod
-    # def runFidder(cls, protocol, args, cwd=None, numberOfMpi=1):
-    #     """ Run fidder command from a given protocol. """
-    #     cmd = cls.getCondaActivationCmd() + " "
-    #     cmd += cls.getFidderEnvActivation()
-    #     cmd += f" && CUDA_VISIBLE_DEVICES=%(GPU)s {FIDDER} "
-    #     protocol.runJob(cmd, args, env=cls.getEnviron(), cwd=cwd, numberOfMpi=numberOfMpi)
