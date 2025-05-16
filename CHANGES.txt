@@ -2,6 +2,7 @@ v1.1.0:
     users:
         - Enable the option of plugin --noBin installation and link the conda env and the models to the plugin
         - Can choose which labels are the ones you want to reject and also you can see miffi labels as attributes in the micrographs
+        - New viewer: accepted, discarded, histogram of miffi labels and labels evolution over time
     developers:
         - --noBin installation enabled
 

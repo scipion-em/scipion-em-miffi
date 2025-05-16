@@ -36,7 +36,8 @@ import time
 import pickle
 from pathlib import Path
 import re
-from collections import defaultdict
+from collections import defaultdict, Counter
+import matplotlib.pyplot as plt
 
 from pyworkflow.protocol import STEPS_PARALLEL
 import pyworkflow.protocol.params as params
@@ -53,7 +54,6 @@ OUTPUT = 'outputMicrographs'
 OUTPUT_DISCARDED = 'outputMicrographsDiscarded'
 
 MIFFI_LABEL = '_miffi_label'
-MIFFI_COMMENT = '_miffi_comment'
 GOOD = 'good'
 BAD_SINGLE = 'bad_single'
 BAD_FILM = 'bad_film'
@@ -64,12 +64,15 @@ BAD_CONTAMINATION = 'bad_contamination'
 BAD_MULTIPLE = 'bad_multiple'
 CATEGORIES = [GOOD, BAD_SINGLE, BAD_FILM, BAD_DRIFT, BAD_MINOR_CRYSTALLINE, BAD_MAJOR_CRYSTALLINE, BAD_CONTAMINATION, BAD_MULTIPLE]
 
+HISTROGRAM_PLOT = 'miffi_label_histogram.png'
+TIME_PLOT = 'miffi_label_time_evolution.png'
+
 class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     """
     Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
     """
     _label = 'categorize micrographs'
-    _devStatus = BETA
+    _devStatus = NEW
     _possibleOutputs = {OUTPUT:SetOfMicrographs,
                         OUTPUT_DISCARDED:SetOfMicrographs}
 
@@ -166,6 +169,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.outputLog = {}
         self.counterBatch = 1
         self.isStreamClosed = self.inputSet.get().isStreamClosed()
+        # Plot variables
+        self.labelHistory = defaultdict(list)
+        self.timeHistory = []
         # Contains images that have been processed in a Step (checkNewOutput).
         self.inputFn = self.inputSet.get().getFileName()
         self._inputClass = self.inputSet.get().getClass()
@@ -304,7 +310,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         for pkl_files in outputCategorizeFiles:
             with open(pkl_files, 'rb') as file:
                 data = pickle.load(file)
-                print(data)
                 for category in CATEGORIES:
                     if category in data:
                         for path in data[category]:
@@ -313,28 +318,26 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         for mic_name, labels in categorized_micrographs.items():
             # Handle bad_multiple separately
-            if BAD_MULTIPLE in labels:
-                other_reasons = [l for l in labels if l != BAD_MULTIPLE]
-                if BAD_MULTIPLE in self.acceptedLabels:
-                    accepted[mic_name] = {
-                        'label': BAD_MULTIPLE,
-                        'comment': ', '.join(other_reasons) if other_reasons else ''
-                    }
-                else:
-                    rejected[mic_name] = {
-                        'label': BAD_MULTIPLE,
-                        'comment': ', '.join(other_reasons) if other_reasons else ''
-                    }
-            else:
-                # Find which of the labels belong to accept or reject lists
-                matching_accept = [l for l in labels if l in self.acceptedLabels]
-                matching_reject = [l for l in labels if l in self.rejectedLabels]
+            #if BAD_MULTIPLE in labels:
+            #    other_reasons = [l for l in labels if l != BAD_MULTIPLE]
+            #    if BAD_MULTIPLE in self.acceptedLabels:
+            #        accepted[mic_name] = {
+            #            'label': BAD_MULTIPLE,
+            #        }
+            #    else:
+            #        rejected[mic_name] = {
+            #            'label': BAD_MULTIPLE,
+            #        }
+            #else:
+            # Find which of the labels belong to accept or reject lists
+            matching_accept = [l for l in labels if l in self.acceptedLabels]
+            matching_reject = [l for l in labels if l in self.rejectedLabels]
 
-                if matching_accept:
-                    # Pick first accepted label, keep original meaning
-                    accepted[mic_name] = {'label': matching_accept[0]}
-                elif matching_reject:
-                    rejected[mic_name] = {'label': matching_reject[0]}
+            if matching_accept:
+                # Pick first accepted label, keep original meaning
+                accepted[mic_name] = {'label': matching_accept[0]}
+            elif matching_reject:
+                rejected[mic_name] = {'label': matching_reject[0]}
 
         # Load output sets
         if accepted:
@@ -349,18 +352,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
             if micName in accepted:
                 setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
-                if 'comment' in accepted[micName]:
-                    setLabel(image, MIFFI_COMMENT, accepted[micName]['comment'])
-                else:
-                    setLabel(image, MIFFI_COMMENT, '')
                 outputSet.append(image)
 
             elif micName in rejected:
                 setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
-                if 'comment' in rejected[micName]:
-                    setLabel(image, MIFFI_COMMENT, rejected[micName].get('comment', ''))
-                else:
-                    setLabel(image, MIFFI_COMMENT, '')
                 outputSetDiscarded.append(image)
 
         if accepted:
@@ -368,7 +363,26 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         if rejected:
             self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
 
-        # Summary log and display the results
+        # === Display the results ===
+        all_labels = {**accepted, **rejected}
+        counter = Counter()
+
+        for v in all_labels.values():
+            counter[v['label']] += 1
+
+        for label, count in counter.items():
+            self.labelHistory[label].extend([None] * count)  # Just used for counting
+
+        now = datetime.now()
+        total_accepted = sum(len(v) for k, v in self.labelHistory.items() if k in self.acceptedLabels)
+        total_rejected = sum(len(v) for k, v in self.labelHistory.items() if k in self.rejectedLabels)
+        self.timeHistory.append((now, total_accepted, total_rejected))
+
+        # === NEW: Call plotting functions ===
+        self._plotMiffiLabelHistogram()
+        self._plotMiffiTimeEvolution()
+
+        # Summary log
         outputLogTmp = populate_and_update_categories(self.outputLog, outputCategorizeLogFiles)
         dict_str = '\n'.join(f'{k}: {v}' for k, v in outputLogTmp.items())
         self.summaryVar.set(dict_str)
@@ -543,6 +557,75 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                                " In total, %s messages has been printed."
                                % (self.previousCount, self.count))
         return methods
+
+    # -------------------------- PLOTS -------------------------------
+    def getMiffiLabelHistogramPlot(self):
+        return self._getExtraPath(HISTROGRAM_PLOT)
+
+    def getMiffiTimeEvolutionPlot(self):
+        return self._getExtraPath(TIME_PLOT)
+
+    def _plotMiffiLabelHistogram(self):
+        # Compute and sort counts
+        label_counts = {label: len(items) for label, items in self.labelHistory.items()}
+        sorted_items = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
+        labels = [label for label, _ in sorted_items]
+        counts = [count for _, count in sorted_items]
+        colors = ['green' if label in self.acceptedLabels else 'red' for label in labels]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        bars = ax.bar(labels, counts, color=colors)
+
+        # Add value labels
+        for bar in bars:
+            yval = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                yval + max(counts) * 0.02,
+                f'{yval}',
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+
+        # Adjust limits and appearance
+        ax.set_ylim(0, max(counts) * 1.15)
+        ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+        ax.set_title("Micrograph Label Distribution", fontsize=14, weight='bold')
+        ax.set_xlabel("Labels", fontsize=12)
+        ax.set_ylabel("Count", fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+
+        plt.savefig(self._getExtraPath(HISTROGRAM_PLOT), bbox_inches='tight')
+        plt.close()
+
+    def _plotMiffiTimeEvolution(self):
+        if not self.timeHistory:
+            self.warning("No time history available for plotting.")
+            return
+
+        times = [entry[0] for entry in self.timeHistory]
+        accepted_counts = [entry[1] for entry in self.timeHistory]
+        rejected_counts = [entry[2] for entry in self.timeHistory]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(times, accepted_counts, label='Accepted', color='green', marker='o')
+        ax.plot(times, rejected_counts, label='Rejected', color='red', marker='o')
+
+        # Add grid
+        ax.grid(True, linestyle='--', alpha=0.7)
+        # Title and labels
+        ax.set_title("Accepted vs Rejected Micrographs Over Time", fontsize=14, weight='bold')
+        ax.set_xlabel("Time", fontsize=12)
+        ax.set_ylabel("Cumulative Micrographs", fontsize=12)
+        ax.legend()
+        fig.autofmt_xdate()
+        plt.tight_layout()
+
+        plot_path = os.path.join(self._getExtraPath(), TIME_PLOT)
+        plt.savefig(plot_path)
+        plt.close()
 
 
 def find_file_with_ending(directory, ending):
