@@ -28,11 +28,11 @@ class MiffiViewer(EmProtocolViewer):
                       label="Visualize discarded Micrographs",
                       help="Visualize discarded Micrographs with the respective Miffi label.")
         form.addParam('visualizeLabelsHistogram', params.LabelParam,
-                      label="Visualize Labels Histogram",
+                      label="Visualize Miffi Labels Histogram",
                       help="Visualize a histogram with miffi labels.")
         form.addParam('visualizeLabelsVsTime', params.LabelParam,
-                      label="Visualize Dose difference vs Time",
-                      help="Visualize plot dose difference against median dose vs time.")
+                      label="Visualize Miffi Labels Time Evolution",
+                      help="Visualize accepted and discarded labels cumulative frequency over time.")
 
     def _getVisualizeDict(self):
         return {
