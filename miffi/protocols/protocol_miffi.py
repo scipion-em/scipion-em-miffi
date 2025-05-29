@@ -160,6 +160,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def initializeParams(self):
         self.finished = False
+        self.firstTime = {OUTPUT: True,
+                          OUTPUT_DISCARDED: True}
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self.processedIds = [] # Ids to be register to output
@@ -317,19 +319,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                             categorized_micrographs[mic_name].append(category)
 
         for mic_name, labels in categorized_micrographs.items():
-            # Handle bad_multiple separately
-            #if BAD_MULTIPLE in labels:
-            #    other_reasons = [l for l in labels if l != BAD_MULTIPLE]
-            #    if BAD_MULTIPLE in self.acceptedLabels:
-            #        accepted[mic_name] = {
-            #            'label': BAD_MULTIPLE,
-            #        }
-            #    else:
-            #        rejected[mic_name] = {
-            #            'label': BAD_MULTIPLE,
-            #        }
-            #else:
-            # Find which of the labels belong to accept or reject lists
             matching_accept = [l for l in labels if l in self.acceptedLabels]
             matching_reject = [l for l in labels if l in self.rejectedLabels]
 
@@ -360,8 +349,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         if accepted:
             self._updateOutputSet(OUTPUT, outputSet, streamMode)
+            if self.firstTime[OUTPUT]:
+                self._defineSourceRelation(self.inputSet, outputSet)
+                self.firstTime[OUTPUT] = False
         if rejected:
             self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+            if self.firstTime[OUTPUT_DISCARDED]:
+                self._defineSourceRelation(self.inputSet, outputSetDiscarded)
+                self.firstTime[OUTPUT_DISCARDED] = False
 
         # === Display the results ===
         all_labels = {**accepted, **rejected}
