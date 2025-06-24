@@ -36,14 +36,16 @@ import time
 import pickle
 from pathlib import Path
 import re
+from collections import defaultdict, Counter
+import matplotlib.pyplot as plt
 
 from pyworkflow.protocol import STEPS_PARALLEL
 import pyworkflow.protocol.params as params
 from pyworkflow.utils import prettyTime, Message
-from pyworkflow.utils.path import cleanPath, makePath, copyFile, moveFile, copyTree
-from pwem.objects import Integer, SetOfMicrographs, Set
+from pyworkflow.utils.path import makePath, copyFile, copyTree
+from pwem.objects import SetOfMicrographs, Set, String
 from pwem.protocols import EMProtocol, ProtPreprocessMicrographs
-from pyworkflow.protocol.constants import STATUS_NEW
+from pyworkflow.protocol.constants import STATUS_NEW, LEVEL_ADVANCED
 from pyworkflow import BETA, UPDATED, NEW, PROD
 
 from .. import Plugin, MIFFI_MODELS
@@ -51,14 +53,31 @@ from .. import Plugin, MIFFI_MODELS
 OUTPUT = 'outputMicrographs'
 OUTPUT_DISCARDED = 'outputMicrographsDiscarded'
 
+MIFFI_LABEL = '_miffi_label'
+GOOD = 'good'
+BAD_SINGLE = 'bad_single'
+BAD_FILM = 'bad_film'
+BAD_DRIFT = 'bad_drift'
+BAD_MINOR_CRYSTALLINE = 'bad_minor_crystalline'
+BAD_MAJOR_CRYSTALLINE = 'bad_major_crystalline'
+BAD_CONTAMINATION = 'bad_contamination'
+BAD_MULTIPLE = 'bad_multiple'
+CATEGORIES = [GOOD, BAD_SINGLE, BAD_FILM, BAD_DRIFT, BAD_MINOR_CRYSTALLINE, BAD_MAJOR_CRYSTALLINE, BAD_CONTAMINATION, BAD_MULTIPLE]
+
+HISTROGRAM_PLOT = 'miffi_label_histogram.png'
+TIME_PLOT = 'miffi_label_time_evolution.png'
+
 class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     """
     Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
     """
     _label = 'categorize micrographs'
-    _devStatus = BETA
+    _devStatus = NEW
     _possibleOutputs = {OUTPUT:SetOfMicrographs,
                         OUTPUT_DISCARDED:SetOfMicrographs}
+
+    LABELS = 0
+    THRESHOLD = 1
 
     def __init__(self, **kwargs):
         ProtPreprocessMicrographs.__init__(self, **kwargs)
@@ -68,7 +87,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     def _defineParams(self, form):
         # You need a params to belong to a section:
         form.addSection(label=Message.LABEL_INPUT)
-
         form.addParam('inputSet', params.PointerParam, pointerClass='SetOfMicrographs',
                       label="Input micrographs", important=True)
         form.addHidden(params.GPU_LIST, params.StringParam, default='0',
@@ -79,7 +97,53 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                             " Micassess can use multiple GPUs - in that case"
                             " set to i.e. *0 1 2*.")
 
-        form.addParallelSection(threads=1, mpi=1)
+        form.addSection(label='Output')
+        form.addParam('doRejection', params.BooleanParam, default=True, label='Reject bad micrographs?',
+                      help='If accepted, micrographs will be rejected based on the following miffi labels: \n'
+                           'bad_film, bad_drift, bad_minor_crystalline, bad_major_crystalline, bad_contamination and bad_multiple.')
+        form.addParam('removeBadFilm', params.BooleanParam, default=True, label='Reject bad film micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_film label: \n'
+                           'this label describes the degree of the support film coverage in the micrograph, \n'
+                           'which can be one of the following: no film, minor film, major film and film.')
+        form.addParam('removeBadDrift', params.BooleanParam, default=True, label='Reject bad drift micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_drift label: \n'
+                           'This label is binary and describes issues of sample displacement, \n'
+                           'where sample drift, cracks, or an empty micrograph is labeled as bad drift.')
+        form.addParam('removeBadMinorCryst', params.BooleanParam, default=True,
+                      label='Reject bad minor crystalline ice micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_minor_crystalline label: \n'
+                           'This label describes the crystallinity of the ice in the sample, \n'
+                           'which is determined by non-diffuse intensity at around 1/3.7 Å-1 in Fourier space. \n'
+                           '_Note_: this will reject only minor crystalline ice micrographs.')
+        form.addParam('removeBadMajorCryst', params.BooleanParam, default=True,
+                      label='Reject bad major crystalline ice micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_major_crystalline label: \n'
+                           'This label describes the crystallinity of the ice in the sample, \n'
+                           'which is determined by non-diffuse intensity at around 1/3.7 Å-1 in Fourier space. \n'
+                           '_Note_: this will reject only major crystalline ice micrographs.')
+        form.addParam('removeBadContamination', params.BooleanParam, default=True, label='Reject bad contaminated micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_contamination label: \n'
+                           'This label is binary and describes whether the micrograph is covered \n'
+                           'largely in contaminant objects, which includes ice crystals and ethane contamination.')
+        form.addParam('removeBadMultiple', params.BooleanParam, default=True,
+                      label='Reject bad multiple micrographs?',
+                      condition='doRejection',
+                      expertLevel=LEVEL_ADVANCED,
+                      help='If accepted, micrographs will be rejected based on bad_multiple label: \n'
+                           'This label is binary and describes whether the micrograph is rejected \n'
+                           'based of more than one criteria.')
+
+        form.addParallelSection(threads=1)
 
         self._defineStreamingParams(form)
         form.getParam('streamingBatchSize').setDefault(5)
@@ -96,19 +160,69 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def initializeParams(self):
         self.finished = False
+        self.firstTime = {OUTPUT: True,
+                          OUTPUT_DISCARDED: True}
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self.processedIds = [] # Ids to be register to output
         self.outputCategorizeFiles = []
         self.outputCategorizeLogFiles = []
+        self.acceptedLabels, self.rejectedLabels = self._getDefinedLabels()
         self.outputLog = {}
         self.counterBatch = 1
         self.isStreamClosed = self.inputSet.get().isStreamClosed()
+        # Plot variables
+        self.labelHistory = defaultdict(list)
+        self.timeHistory = []
         # Contains images that have been processed in a Step (checkNewOutput).
         self.inputFn = self.inputSet.get().getFileName()
         self._inputClass = self.inputSet.get().getClass()
         self._inputType = self.inputSet.get().getClassName().split('SetOf')[1]
         self._baseName = '%s.sqlite' % self._inputType.lower()
+
+    def _getDefinedLabels(self):
+        categories = {
+            'accept': [GOOD], # always accept 'good'
+            'reject': []
+        }
+
+        if self.removeBadFilm:
+            categories['reject'].append(BAD_FILM)
+        else:
+            categories['accept'].append(BAD_FILM)
+
+        if self.removeBadDrift:
+            categories['reject'].append(BAD_DRIFT)
+        else:
+            categories['accept'].append(BAD_DRIFT)
+
+        if self.removeBadMinorCryst:
+            categories['reject'].append(BAD_MINOR_CRYSTALLINE)
+        else:
+            categories['accept'].append(BAD_MINOR_CRYSTALLINE)
+
+        if self.removeBadMajorCryst:
+            categories['reject'].append(BAD_MAJOR_CRYSTALLINE)
+        else:
+            categories['accept'].append(BAD_MAJOR_CRYSTALLINE)
+
+        if self.removeBadContamination:
+            categories['reject'].append(BAD_CONTAMINATION)
+        else:
+            categories['accept'].append(BAD_CONTAMINATION)
+
+        if self.removeBadMultiple:
+            categories['reject'].append(BAD_MULTIPLE)
+        else:
+            categories['accept'].append(BAD_MULTIPLE)
+
+        accepted_labels = categories['accept']
+        rejected_labels = categories['reject']
+
+        self.info("These are the labels that will be accepted %s" % accepted_labels)
+        self.info("These are the labels that will be rejected %s" % rejected_labels)
+
+        return accepted_labels, rejected_labels
 
     def _getFirstJoinStepName(self):
         # This function will be used for streaming, to check which is
@@ -185,51 +299,85 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             # so we exit from the function here
             return
 
-        # Miffi program
         outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
         outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
         self.outputCategorizeFiles = []  # These mics are already registered
         self.outputCategorizeLogFiles = []
         inputSet = self._loadInputSet(self.inputFn)
 
-        # Initialize combined lists
-        all_good = []
-        all_bad = []
+        categorized_micrographs = defaultdict(list)
+        accepted = {}
+        rejected = {}
 
         for pkl_files in outputCategorizeFiles:
             with open(pkl_files, 'rb') as file:
                 data = pickle.load(file)
-                # Check for the presence of 'good_high_conf' and 'good_low_conf' and extract file names
-                if 'good' in data:
-                    all_good.extend([Path(path).name for path in data['good']])
+                for category in CATEGORIES:
+                    if category in data:
+                        for path in data[category]:
+                            mic_name = Path(path).name
+                            categorized_micrographs[mic_name].append(category)
 
-                if 'bad_single' in data:
-                    all_bad.extend([Path(path).name for path in data['bad_single']])
+        for mic_name, labels in categorized_micrographs.items():
+            matching_accept = [l for l in labels if l in self.acceptedLabels]
+            matching_reject = [l for l in labels if l in self.rejectedLabels]
 
-                if 'bad_multiple' in data:
-                    all_bad.extend([Path(path).name for path in data['bad_multiple']])
+            if matching_accept:
+                # Pick first accepted label, keep original meaning
+                accepted[mic_name] = {'label': matching_accept[0]}
+            elif matching_reject:
+                rejected[mic_name] = {'label': matching_reject[0]}
 
-        if all_good:
+        # Load output sets
+        if accepted:
             outputSet = self._loadOutputSet(self._inputClass, self._baseName)
+        if rejected:
+            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite')
 
-        if all_bad:
-            outputSetDiscarded = self._loadOutputSet(SetOfMicrographs, 'micrograph' + 'DISCARDED' + '.sqlite')
-
+        # Assign micrographs to their sets with attributes
         for imageId in newDone:
             image = inputSet.getItem("id", imageId).clone()
             micName = os.path.basename(image.getFileName())
-            if micName in all_good:
+
+            if micName in accepted:
+                setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
                 outputSet.append(image)
-            if micName in all_bad:
+
+            elif micName in rejected:
+                setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
                 outputSetDiscarded.append(image)
 
-        if all_good:
+        if accepted:
             self._updateOutputSet(OUTPUT, outputSet, streamMode)
-
-        if all_bad:
+            if self.firstTime[OUTPUT]:
+                self._defineSourceRelation(self.inputSet, outputSet)
+                self.firstTime[OUTPUT] = False
+        if rejected:
             self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+            if self.firstTime[OUTPUT_DISCARDED]:
+                self._defineSourceRelation(self.inputSet, outputSetDiscarded)
+                self.firstTime[OUTPUT_DISCARDED] = False
 
-        # Summary log and display the results
+        # === Display the results ===
+        all_labels = {**accepted, **rejected}
+        counter = Counter()
+
+        for v in all_labels.values():
+            counter[v['label']] += 1
+
+        for label, count in counter.items():
+            self.labelHistory[label].extend([None] * count)  # Just used for counting
+
+        now = datetime.now()
+        total_accepted = sum(len(v) for k, v in self.labelHistory.items() if k in self.acceptedLabels)
+        total_rejected = sum(len(v) for k, v in self.labelHistory.items() if k in self.rejectedLabels)
+        self.timeHistory.append((now, total_accepted, total_rejected))
+
+        # === NEW: Call plotting functions ===
+        self._plotMiffiLabelHistogram()
+        self._plotMiffiTimeEvolution()
+
+        # Summary log
         outputLogTmp = populate_and_update_categories(self.outputLog, outputCategorizeLogFiles)
         dict_str = '\n'.join(f'{k}: {v}' for k, v in outputLogTmp.items())
         self.summaryVar.set(dict_str)
@@ -405,6 +553,75 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                                % (self.previousCount, self.count))
         return methods
 
+    # -------------------------- PLOTS -------------------------------
+    def getMiffiLabelHistogramPlot(self):
+        return self._getExtraPath(HISTROGRAM_PLOT)
+
+    def getMiffiTimeEvolutionPlot(self):
+        return self._getExtraPath(TIME_PLOT)
+
+    def _plotMiffiLabelHistogram(self):
+        # Compute and sort counts
+        label_counts = {label: len(items) for label, items in self.labelHistory.items()}
+        sorted_items = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
+        labels = [label for label, _ in sorted_items]
+        counts = [count for _, count in sorted_items]
+        colors = ['green' if label in self.acceptedLabels else 'red' for label in labels]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        bars = ax.bar(labels, counts, color=colors)
+
+        # Add value labels
+        for bar in bars:
+            yval = bar.get_height()
+            ax.text(
+                bar.get_x() + bar.get_width() / 2.0,
+                yval + max(counts) * 0.02,
+                f'{yval}',
+                ha='center',
+                va='bottom',
+                fontsize=10
+            )
+
+        # Adjust limits and appearance
+        ax.set_ylim(0, max(counts) * 1.15)
+        ax.yaxis.grid(True, linestyle='--', alpha=0.7)
+        ax.set_title("Micrograph Label Distribution", fontsize=14, weight='bold')
+        ax.set_xlabel("Labels", fontsize=12)
+        ax.set_ylabel("Count", fontsize=12)
+        plt.xticks(rotation=45, ha='right')
+        plt.tight_layout()
+
+        plt.savefig(self._getExtraPath(HISTROGRAM_PLOT), bbox_inches='tight')
+        plt.close()
+
+    def _plotMiffiTimeEvolution(self):
+        if not self.timeHistory:
+            self.warning("No time history available for plotting.")
+            return
+
+        times = [entry[0] for entry in self.timeHistory]
+        accepted_counts = [entry[1] for entry in self.timeHistory]
+        rejected_counts = [entry[2] for entry in self.timeHistory]
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        ax.plot(times, accepted_counts, label='Accepted', color='green', marker='o')
+        ax.plot(times, rejected_counts, label='Rejected', color='red', marker='o')
+
+        # Add grid
+        ax.grid(True, linestyle='--', alpha=0.7)
+        # Title and labels
+        ax.set_title("Accepted vs Rejected Micrographs Over Time", fontsize=14, weight='bold')
+        ax.set_xlabel("Time", fontsize=12)
+        ax.set_ylabel("Cumulative Micrographs", fontsize=12)
+        ax.legend()
+        fig.autofmt_xdate()
+        plt.tight_layout()
+
+        plot_path = os.path.join(self._getExtraPath(), TIME_PLOT)
+        plt.savefig(plot_path)
+        plt.close()
+
 
 def find_file_with_ending(directory, ending):
     """
@@ -444,3 +661,14 @@ def populate_and_update_categories(existing_totals, log_files):
                     # Add new categories or update existing totals
                     existing_totals[category] = existing_totals.get(category, 0) + count
     return existing_totals
+
+def setLabel(obj, label, value):
+    if value is None:
+        return
+    setattr(obj, label, getScipionObj(value))
+
+def getScipionObj(value):
+    if isinstance(value, str):
+        return String(value)
+    else:
+        return None
