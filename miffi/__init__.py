@@ -31,6 +31,9 @@ import os
 from miffi.constants import *
 
 __version__ = "1.1.0"  # plugin version
+
+from pyworkflow import SPA
+
 _logo = "miffi_logo.png"
 _references = ['DaXu2024']
 
@@ -39,6 +42,7 @@ class Plugin(pwem.Plugin):
     _pathVars = [MIFFI_MODELS]
     _url = "https://github.com/scipion-em/scipion-em-miffi"
     _supportedVersions = VERSIONS  # binary version
+    _processingField = [SPA]
 
     @classmethod
     def _defineVariables(cls):
