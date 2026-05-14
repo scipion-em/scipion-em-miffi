@@ -69,7 +69,147 @@ TIME_PLOT = 'miffi_label_time_evolution.png'
 
 class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     """
-    Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
+    Categorizes cryo-EM micrographs according to image quality and Fourier-space characteristics in order to separate
+    suitable acquisitions from problematic data before downstream single-particle analysis. The protocol evaluates
+    micrographs using automated MIFFI classification categories related to contamination, drift, crystalline ice,
+    support film coverage, and combined acquisition artifacts, allowing users to rapidly identify datasets that are
+    appropriate for further processing while discarding images likely to reduce reconstruction quality. More info:
+    https://github.com/nysbc/Anisotropy
+
+    AI Generated:
+
+    Categorize Micrographs (MiffiProtMicrographs) - User Manual
+        Overview
+
+        The Categorize Micrographs protocol performs automated quality assessment of cryo-EM micrographs using the
+        MIFFI framework. Its main objective is to classify large collections of micrographs into biologically and
+        experimentally meaningful quality categories so that unsuitable images can be excluded before expensive
+        downstream processing steps such as particle picking, classification, or high-resolution reconstruction.
+
+        In practical cryo-EM workflows, data quality is often heterogeneous. Ice contamination, sample drift,
+        crystalline ice formation, excessive support film visibility, or acquisition artifacts may affect only a
+        subset of images. Manual inspection becomes increasingly difficult as datasets grow to tens or hundreds of
+        thousands of micrographs. This protocol addresses that challenge by providing automated categorization and
+        optional rejection of poor-quality images in a reproducible and scalable manner.
+
+        Biological Motivation
+
+        The quality of the final reconstruction strongly depends on the quality of the input micrographs. Poor
+        micrographs introduce noise, bias alignment procedures, reduce particle-picking reliability, and can
+        significantly limit achievable resolution. Automated quality categorization therefore acts as an early
+        filtering stage that improves the overall robustness of the cryo-EM pipeline.
+
+        From a biological perspective, removing strongly contaminated or highly crystalline images prevents the
+        reconstruction from being dominated by artifacts unrelated to the molecular specimen. Similarly, excluding
+        images affected by drift or severe support film interference improves particle consistency and contributes to
+        more stable alignment and classification.
+
+        Input Data and Workflow
+
+        The protocol operates on a set of cryo-EM micrographs that may be acquired either in streaming mode during
+        microscope collection or as a previously completed dataset. Each micrograph is evaluated independently through
+        automated inference and categorization procedures that analyze both the spatial image content and its Fourier
+        transform characteristics.
+
+        The workflow is designed to support high-throughput cryo-EM facilities and automated acquisition pipelines.
+        Incoming micrographs can be processed continuously as they become available, allowing quality control to occur
+        in near real time during data collection. This enables users to identify acquisition problems early, reducing
+        wasted microscope time and allowing rapid intervention when imaging conditions deteriorate.
+
+        The protocol separates outputs into accepted and rejected micrograph sets. Accepted micrographs correspond to
+        images considered suitable for downstream processing, while rejected micrographs contain images classified as
+        problematic according to user-defined criteria.
+
+        Quality Categories and Their Meaning
+
+        The protocol evaluates several biologically relevant categories associated with cryo-EM image quality.
+
+        The bad film category identifies excessive support film visibility or coverage. Images dominated by support
+        film may contain reduced particle contrast or non-uniform background intensity, making downstream processing
+        less reliable. Depending on the experimental strategy, some users may tolerate limited film presence while
+        rejecting severe cases.
+
+        The bad drift category detects acquisition instability caused by sample motion, stage drift, cracks, or empty
+        fields of view. Such images frequently exhibit blurred particle features and reduced high-resolution signal.
+
+        Minor and major crystalline ice categories identify the presence of crystalline ice artifacts visible in
+        Fourier space. Minor crystalline ice may sometimes remain tolerable in exploratory analyses, whereas major
+        crystalline ice generally compromises image usability and can severely interfere with particle alignment.
+
+        The contamination category identifies images heavily affected by contaminants such as ice crystals, ethane
+        residues, or dense foreign particles. Strong contamination can obscure biological particles and bias particle
+        picking procedures.
+
+        The multiple category represents micrographs simultaneously affected by more than one major issue. These
+        images are commonly unsuitable for high-resolution processing and are often best excluded entirely.
+
+        Flexible Rejection Strategy
+
+        A major strength of the protocol is the ability to customize which categories are rejected. Different cryo-EM
+        projects may tolerate different levels of image imperfection depending on the biological target, particle
+        abundance, dataset size, and intended reconstruction resolution.
+
+        For example, highly abundant and rigid particles may still produce acceptable reconstructions even when minor
+        crystalline ice is present. Conversely, challenging membrane proteins or flexible complexes often require very
+        strict micrograph quality filtering to achieve stable downstream alignment.
+
+        The protocol therefore allows users to selectively reject only the categories considered unacceptable for a
+        specific biological project. This flexibility makes the protocol useful both for conservative facility-level
+        quality control and for exploratory research workflows where preserving dataset size may be important.
+
+        Streaming and High-Throughput Processing
+
+        The protocol supports streaming operation, enabling continuous processing during data acquisition. This mode is
+        especially valuable in modern automated cryo-EM facilities where datasets are collected continuously over many
+        hours or days.
+
+        Streaming analysis allows users to monitor data quality trends over time and identify acquisition problems
+        while microscopy sessions are still running. Sudden increases in contamination, drift, or crystalline ice may
+        indicate microscope instability, sample degradation, or changes in imaging conditions that require immediate
+        intervention.
+
+        The protocol processes micrographs in configurable batches, balancing computational efficiency with rapid
+        feedback. GPU acceleration is supported to improve throughput when handling very large datasets.
+
+        Outputs and Interpretation
+
+        The protocol produces accepted and rejected micrograph sets together with associated quality labels. Each
+        micrograph retains information describing the category responsible for its classification, allowing users to
+        inspect and interpret filtering decisions.
+
+        In addition to categorized outputs, the protocol generates graphical summaries that help users understand the
+        evolution of dataset quality over time. Histogram plots summarize the distribution of quality categories,
+        while temporal plots track the cumulative number of accepted and rejected micrographs during acquisition or
+        processing.
+
+        These summaries provide valuable insight into microscope performance and dataset stability. Persistent growth
+        in rejection categories may indicate underlying experimental problems that should be investigated before
+        continuing data collection.
+
+        Practical Recommendations
+
+        In routine cryo-EM workflows, it is generally advisable to begin with conservative rejection criteria focused
+        on severe contamination, major crystalline ice, and strong drift artifacts. This approach removes the most
+        problematic images while preserving sufficient dataset size for downstream analysis.
+
+        For high-resolution projects or particularly difficult specimens, stricter rejection policies may improve
+        reconstruction quality. In contrast, exploratory analyses or very small datasets may benefit from retaining
+        some borderline micrographs to maximize particle numbers.
+
+        Users should periodically inspect both accepted and rejected outputs visually. Automated categorization is
+        highly valuable, but biological interpretation and experimental context remain important when deciding final
+        inclusion criteria.
+
+        Final Perspective
+
+        Automated micrograph quality assessment is an increasingly essential component of modern cryo-EM workflows.
+        By rapidly identifying problematic images and organizing datasets according to biologically meaningful quality
+        categories, this protocol helps improve reconstruction reliability, reduces downstream computational cost, and
+        supports efficient high-throughput cryo-EM data collection.
+
+        Careful interpretation of rejection categories, combined with periodic visual inspection and awareness of the
+        biological objectives of the project, allows users to balance dataset quality and dataset size in a way that
+        best supports accurate structural determination.
     """
     _label = 'categorize micrographs'
     _devStatus = NEW
