@@ -242,15 +242,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self._checkNewOutput()
 
     def _checkNewInput(self):
-        # Check if there are new images to process from the input set
+        # Check if there are new images to process from the input set.
+        # Let the Set decide how logical changes are detected.
         self.lastCheck = getattr(self, 'lastCheck', datetime.now())
-        mTime = datetime.fromtimestamp(os.path.getmtime(self.inputFn))
-        self.debug('Last check: %s, modification: %s'
-                    % (prettyTime(self.lastCheck),
-                       prettyTime(mTime)))
-        # If the input.sqlite have not changed since our last check,
-        # it does not make sense to check for new input data
-        if self.lastCheck > mTime and self.insertedIds:  # If this is empty it is dut to a static "continue" action or it is the first round
+        inputSetRef = self.inputSet.get()
+        self.debug('Last check: %s' % prettyTime(self.lastCheck))
+
+        if self.insertedIds and not inputSetRef.hasChangedSince(self.lastCheck):
             return None
 
         inputSet = self._loadInputSet(self.inputFn)
@@ -391,8 +389,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self._store()
 
     def _loadInputSet(self, inputFn):
-        self.debug("Loading input db: %s" % inputFn)
-        inputSet = self._inputClass(filename=inputFn)
+        self.debug("Reloading input set: %s" % inputFn)
+        inputSet = self.inputSet.get()
+        inputSet.close()
+        inputSet.load()
         inputSet.loadAllProperties()
         return inputSet
 
@@ -435,16 +435,19 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         batchDirTmp = self.prepareBatch(newIds, counterBatch)
         try:
             inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
-            categorize_output_file, categorize_output_log_file  = self.runMiffiCategorize(counterBatch, inference_output_file)
+            categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(
+                counterBatch, inference_output_file
+            )
             self.outputCategorizeFiles.append(categorize_output_file)
             self.outputCategorizeLogFiles.append(categorize_output_log_file)
+            self.processedIds.extend(newIds)
         except Exception as e:
             self.info('Batch number %d had problems with miffi execution' % counterBatch)
             self.info(e)
-
-        self.processedIds.extend(newIds)
-        # To have a control in the size of the protocol
-        self.deleteBatch(batchDirTmp)
+            raise
+        finally:
+            # To have a control in the size of the protocol
+            self.deleteBatch(batchDirTmp)
 
         if not self.isStreamClosed:
             self.delayRegister()
