@@ -282,7 +282,24 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def _checkNewOutput(self):
         doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
-        processedIds = copy.deepcopy(self.processedIds)
+
+        # miffStep runs in parallel with _stepsCheck. Snapshot the ids and
+        # their result files atomically, otherwise a worker can publish a
+        # result between deepcopy() and the queue reset and lose that result.
+        resultsLock = getattr(self, '_lock', None)
+        if resultsLock is None:
+            # Lightweight regression harnesses do not instantiate Protocol.
+            resultsLock = self._resultsLock
+
+        with resultsLock:
+            processedIds = copy.deepcopy(self.processedIds)
+            outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
+            outputCategorizeLogFiles = copy.deepcopy(
+                self.outputCategorizeLogFiles
+            )
+            self.outputCategorizeFiles = []
+            self.outputCategorizeLogFiles = []
+
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
         allDone = len(doneListIds) + len(newDone)
         maxSize = self._loadInputSet(self.inputFn).getSize()
@@ -296,11 +313,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             # it does not make sense to proceed and updated the outputs
             # so we exit from the function here
             return
-
-        outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
-        outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
-        self.outputCategorizeFiles = []  # These mics are already registered
-        self.outputCategorizeLogFiles = []
         inputSet = self._loadInputSet(self.inputFn)
 
         categorized_micrographs = defaultdict(list)
@@ -438,9 +450,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(
                 counterBatch, inference_output_file
             )
-            self.outputCategorizeFiles.append(categorize_output_file)
-            self.outputCategorizeLogFiles.append(categorize_output_log_file)
-            self.processedIds.extend(newIds)
+            resultsLock = getattr(self, '_lock', None)
+            if resultsLock is None:
+                # Lightweight regression harnesses do not instantiate Protocol.
+                resultsLock = self._resultsLock
+
+            with resultsLock:
+                self.outputCategorizeFiles.append(categorize_output_file)
+                self.outputCategorizeLogFiles.append(categorize_output_log_file)
+                self.processedIds.extend(newIds)
         except Exception as e:
             self.info('Batch number %d had problems with miffi execution' % counterBatch)
             self.info(e)

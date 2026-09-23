@@ -171,5 +171,185 @@ class TestMiffiBatchFailureRegression(unittest.TestCase):
         self.assertEqual(protocol.outputCategorizeLogFiles, [])
 
 
+
+class TestMiffiPendingResultsRegression(unittest.TestCase):
+    def testResultsFinishedDuringOutputSnapshotAreNotLost(self):
+        import copy as stdcopy
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+        from unittest.mock import patch
+
+        from miffi.protocols import protocol_miffi as miffi_module
+
+        with tempfile.TemporaryDirectory() as tmp:
+            firstPkl = os.path.join(tmp, "batch_1_dict.pkl")
+            firstLog = os.path.join(tmp, "batch_1.log")
+            latePkl = os.path.join(tmp, "batch_2_dict.pkl")
+            lateLog = os.path.join(tmp, "batch_2.log")
+
+            for path in (firstPkl, latePkl):
+                with open(path, "wb") as handle:
+                    pickle.dump({}, handle)
+
+            for path in (firstLog, lateLog):
+                with open(path, "w") as handle:
+                    handle.write("")
+
+            class _Summary:
+                def __init__(self):
+                    self.value = ""
+
+                def set(self, value):
+                    self.value = value
+
+            class _Image:
+                def __init__(self, objId):
+                    self.objId = objId
+
+                def clone(self):
+                    return _Image(self.objId)
+
+                def getFileName(self):
+                    return os.path.join(tmp, f"mic_{self.objId}.mrc")
+
+            class _Input:
+                def getSize(self):
+                    return 2
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    return _Image(objId)
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [firstPkl]
+                    self.outputCategorizeLogFiles = [firstLog]
+                    self.isStreamClosed = True
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = object()
+
+                def _getAllDoneIds(self):
+                    return [], 0, [], []
+
+                def _loadInputSet(self, inputFn):
+                    return _Input()
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _getFirstJoinStep(self):
+                    return None
+
+                def _store(self):
+                    pass
+
+                def prepareBatch(self, newIds, counterBatch):
+                    return os.path.join(tmp, f"batch_{counterBatch}")
+
+                def runMiffiInference(self, batchDir, counterBatch):
+                    return "inference.pkl"
+
+                def runMiffiCategorize(self, counterBatch, inferenceFile):
+                    return latePkl, lateLog
+
+                def deleteBatch(self, batchDir):
+                    pass
+
+                def info(self, *args, **kwargs):
+                    pass
+
+                def delayRegister(self):
+                    pass
+
+            protocol = _Harness()
+            snapshotStarted = threading.Event()
+            workerDone = threading.Event()
+            workerErrors = []
+            realDeepcopy = stdcopy.deepcopy
+
+            def _finishSecondBatch():
+                try:
+                    snapshotStarted.wait(timeout=2)
+                    miffi_module.MiffiProtMicrographs.miffStep(
+                        protocol,
+                        [2],
+                        2,
+                    )
+                except Exception as exc:
+                    workerErrors.append(exc)
+                finally:
+                    workerDone.set()
+
+            def _controlledDeepcopy(value, memo=None):
+                if value is protocol.outputCategorizeFiles:
+                    snapshot = realDeepcopy(value, memo)
+                    snapshotStarted.set()
+
+                    # Without synchronization miffStep can append right here,
+                    # between the snapshot and the queue reset. With the
+                    # protocol result lock held, the worker must wait until
+                    # the snapshot/reset transaction is complete.
+                    if not protocol._resultsLock.locked():
+                        if not workerDone.wait(timeout=2):
+                            raise AssertionError(
+                                "The simulated MIFFI worker did not finish "
+                                "inside the unsynchronized snapshot window."
+                            )
+                    return snapshot
+
+                return realDeepcopy(value, memo)
+
+            worker = threading.Thread(target=_finishSecondBatch)
+            worker.start()
+
+            try:
+                with patch.object(
+                    miffi_module.copy,
+                    "deepcopy",
+                    side_effect=_controlledDeepcopy,
+                ):
+                    miffi_module.MiffiProtMicrographs._checkNewOutput(
+                        protocol
+                    )
+            finally:
+                snapshotStarted.set()
+                worker.join(timeout=2)
+
+            self.assertFalse(
+                worker.is_alive(),
+                "The simulated MIFFI worker must not remain blocked.",
+            )
+            self.assertEqual([], workerErrors)
+
+            self.assertIn(
+                latePkl,
+                protocol.outputCategorizeFiles,
+                "A batch finishing while output results are snapshotted "
+                "must remain pending for the next registration cycle.",
+            )
+            self.assertIn(
+                lateLog,
+                protocol.outputCategorizeLogFiles,
+            )
+            self.assertIn(2, protocol.processedIds)
+
 if __name__ == "__main__":
     unittest.main()
