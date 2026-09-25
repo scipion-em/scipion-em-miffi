@@ -242,15 +242,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self._checkNewOutput()
 
     def _checkNewInput(self):
-        # Check if there are new images to process from the input set
+        # Check if there are new images to process from the input set.
+        # Let the Set decide how logical changes are detected.
         self.lastCheck = getattr(self, 'lastCheck', datetime.now())
-        mTime = datetime.fromtimestamp(os.path.getmtime(self.inputFn))
-        self.debug('Last check: %s, modification: %s'
-                    % (prettyTime(self.lastCheck),
-                       prettyTime(mTime)))
-        # If the input.sqlite have not changed since our last check,
-        # it does not make sense to check for new input data
-        if self.lastCheck > mTime and self.insertedIds:  # If this is empty it is dut to a static "continue" action or it is the first round
+        inputSetRef = self.inputSet.get()
+        self.debug('Last check: %s' % prettyTime(self.lastCheck))
+
+        if self.insertedIds and not inputSetRef.hasChangedSince(self.lastCheck):
             return None
 
         inputSet = self._loadInputSet(self.inputFn)
@@ -284,7 +282,24 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def _checkNewOutput(self):
         doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
-        processedIds = copy.deepcopy(self.processedIds)
+
+        # miffStep runs in parallel with _stepsCheck. Snapshot the ids and
+        # their result files atomically, otherwise a worker can publish a
+        # result between deepcopy() and the queue reset and lose that result.
+        resultsLock = getattr(self, '_lock', None)
+        if resultsLock is None:
+            # Lightweight regression harnesses do not instantiate Protocol.
+            resultsLock = self._resultsLock
+
+        with resultsLock:
+            processedIds = copy.deepcopy(self.processedIds)
+            outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
+            outputCategorizeLogFiles = copy.deepcopy(
+                self.outputCategorizeLogFiles
+            )
+            self.outputCategorizeFiles = []
+            self.outputCategorizeLogFiles = []
+
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
         allDone = len(doneListIds) + len(newDone)
         maxSize = self._loadInputSet(self.inputFn).getSize()
@@ -298,11 +313,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             # it does not make sense to proceed and updated the outputs
             # so we exit from the function here
             return
-
-        outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
-        outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
-        self.outputCategorizeFiles = []  # These mics are already registered
-        self.outputCategorizeLogFiles = []
         inputSet = self._loadInputSet(self.inputFn)
 
         categorized_micrographs = defaultdict(list)
@@ -330,9 +340,11 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         # Load output sets
         if accepted:
-            outputSet = self._loadOutputSet(self._inputClass, self._baseName)
+            outputSet = self._loadOutputSet(self._inputClass, self._baseName,
+                                            outputName=OUTPUT)
         if rejected:
-            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite')
+            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite',
+                                                      outputName=OUTPUT_DISCARDED)
 
         # Assign micrographs to their sets with attributes
         for imageId in newDone:
@@ -391,21 +403,31 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self._store()
 
     def _loadInputSet(self, inputFn):
-        self.debug("Loading input db: %s" % inputFn)
-        inputSet = self._inputClass(filename=inputFn)
+        self.debug("Reloading input set: %s" % inputFn)
+        inputSet = self.inputSet.get()
+        inputSet.close()
+        inputSet.load()
         inputSet.loadAllProperties()
         return inputSet
 
-    def _loadOutputSet(self, SetClass, baseName):
-        setFile = self._getPath(baseName)
-
-        if os.path.exists(setFile):
-            outputSet = SetClass(filename=setFile)
-            outputSet.loadAllProperties()
+    def _loadOutputSet(self, SetClass, baseName, outputName=None):
+        # Reuse the logical output Scipion already knows about before
+        # falling back to the on-disk backing file, otherwise an output
+        # still awaiting its backing file to materialize would be silently
+        # discarded and replaced with an empty fresh Set.
+        outputSet = getattr(self, outputName, None) if outputName else None
+        if outputSet is not None:
             outputSet.enableAppend()
         else:
-            outputSet = SetClass(filename=setFile)
-            outputSet.setStreamState(outputSet.STREAM_OPEN)
+            setFile = self._getPath(baseName)
+
+            if os.path.exists(setFile):
+                outputSet = SetClass(filename=setFile)
+                outputSet.loadAllProperties()
+                outputSet.enableAppend()
+            else:
+                outputSet = SetClass(filename=setFile)
+                outputSet.setStreamState(outputSet.STREAM_OPEN)
 
         inputs = self.inputSet.get()
         outputSet.copyInfo(inputs)
@@ -435,16 +457,25 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         batchDirTmp = self.prepareBatch(newIds, counterBatch)
         try:
             inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
-            categorize_output_file, categorize_output_log_file  = self.runMiffiCategorize(counterBatch, inference_output_file)
-            self.outputCategorizeFiles.append(categorize_output_file)
-            self.outputCategorizeLogFiles.append(categorize_output_log_file)
+            categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(
+                counterBatch, inference_output_file
+            )
+            resultsLock = getattr(self, '_lock', None)
+            if resultsLock is None:
+                # Lightweight regression harnesses do not instantiate Protocol.
+                resultsLock = self._resultsLock
+
+            with resultsLock:
+                self.outputCategorizeFiles.append(categorize_output_file)
+                self.outputCategorizeLogFiles.append(categorize_output_log_file)
+                self.processedIds.extend(newIds)
         except Exception as e:
             self.info('Batch number %d had problems with miffi execution' % counterBatch)
             self.info(e)
-
-        self.processedIds.extend(newIds)
-        # To have a control in the size of the protocol
-        self.deleteBatch(batchDirTmp)
+            raise
+        finally:
+            # To have a control in the size of the protocol
+            self.deleteBatch(batchDirTmp)
 
         if not self.isStreamClosed:
             self.delayRegister()
