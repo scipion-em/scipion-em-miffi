@@ -340,9 +340,11 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         # Load output sets
         if accepted:
-            outputSet = self._loadOutputSet(self._inputClass, self._baseName)
+            outputSet = self._loadOutputSet(self._inputClass, self._baseName,
+                                            outputName=OUTPUT)
         if rejected:
-            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite')
+            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite',
+                                                      outputName=OUTPUT_DISCARDED)
 
         # Assign micrographs to their sets with attributes
         for imageId in newDone:
@@ -408,16 +410,24 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         inputSet.loadAllProperties()
         return inputSet
 
-    def _loadOutputSet(self, SetClass, baseName):
-        setFile = self._getPath(baseName)
-
-        if os.path.exists(setFile):
-            outputSet = SetClass(filename=setFile)
-            outputSet.loadAllProperties()
+    def _loadOutputSet(self, SetClass, baseName, outputName=None):
+        # Reuse the logical output Scipion already knows about before
+        # falling back to the on-disk backing file, otherwise an output
+        # still awaiting its backing file to materialize would be silently
+        # discarded and replaced with an empty fresh Set.
+        outputSet = getattr(self, outputName, None) if outputName else None
+        if outputSet is not None:
             outputSet.enableAppend()
         else:
-            outputSet = SetClass(filename=setFile)
-            outputSet.setStreamState(outputSet.STREAM_OPEN)
+            setFile = self._getPath(baseName)
+
+            if os.path.exists(setFile):
+                outputSet = SetClass(filename=setFile)
+                outputSet.loadAllProperties()
+                outputSet.enableAppend()
+            else:
+                outputSet = SetClass(filename=setFile)
+                outputSet.setStreamState(outputSet.STREAM_OPEN)
 
         inputs = self.inputSet.get()
         outputSet.copyInfo(inputs)

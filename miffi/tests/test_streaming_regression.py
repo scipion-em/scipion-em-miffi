@@ -6,8 +6,10 @@
 
 import unittest
 from datetime import datetime
+from unittest.mock import patch
 
 from miffi.protocols.protocol_miffi import MiffiProtMicrographs
+from miffi.protocols import protocol_miffi as miffi_module
 
 
 class _Value:
@@ -350,6 +352,50 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 protocol.outputCategorizeLogFiles,
             )
             self.assertIn(2, protocol.processedIds)
+
+
+class _ExistingOutputSet:
+    def __init__(self):
+        self.enableAppendCalls = 0
+        self.copiedFrom = None
+
+    def enableAppend(self):
+        self.enableAppendCalls += 1
+
+    def copyInfo(self, inputs):
+        self.copiedFrom = inputs
+
+
+class TestMiffiLoadOutputSetRegression(unittest.TestCase):
+    def testLoadOutputSetReusesLogicalOutputWithoutBackingFile(self):
+        # Regression test: an output that Scipion already knows about
+        # (protocol.outputMicrographs) must be reused even when its backing
+        # file was never materialized on disk yet. Falling through to "no
+        # backing file -> build a fresh, empty Set" would silently discard
+        # whatever was already appended to the real logical output.
+        existingOutputSet = _ExistingOutputSet()
+        inputs = object()
+
+        class _Harness:
+            def __init__(self):
+                self.outputMicrographs = existingOutputSet
+                self.inputSet = _Pointer(inputs)
+
+            def _getPath(self, name):
+                return "/tmp/" + name
+
+        protocol = _Harness()
+
+        with patch.object(miffi_module.os.path, "exists", return_value=False):
+            outputSet = MiffiProtMicrographs._loadOutputSet(
+                protocol, object, "micrographs.dat",
+                outputName=miffi_module.OUTPUT,
+            )
+
+        self.assertIs(existingOutputSet, outputSet)
+        self.assertEqual(1, existingOutputSet.enableAppendCalls)
+        self.assertIs(inputs, existingOutputSet.copiedFrom)
+
 
 if __name__ == "__main__":
     unittest.main()
