@@ -79,6 +79,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
     LABELS = 0
     THRESHOLD = 1
 
+    MIC_VISIBILITY_MAX_ATTEMPTS = 3
+    MIC_VISIBILITY_RETRY_DELAY = 1  # seconds
+
     def __init__(self, **kwargs):
         ProtPreprocessMicrographs.__init__(self, **kwargs)
         self.stepsExecutionMode = STEPS_PARALLEL
@@ -348,6 +351,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         # Assign micrographs to their sets with attributes
         for imageId in newDone:
+            # Set.getItem raises rather than returning None for a row
+            # it cannot find - check membership first before indexing.
+            if imageId not in inputSet:
+                self.error(
+                    "Micrograph with id %d is not visible in the input "
+                    "Set; excluding it from the output." % imageId
+                )
+                continue
+
             image = inputSet.getItem("id", imageId).clone()
             micName = os.path.basename(image.getFileName())
 
@@ -484,8 +496,30 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
         makePath(batchDirTmp)
         inputMicSet = self._loadInputSet(self.inputFn)
+
         for micId in newIds:
-            mic = inputMicSet.getItem("id", micId).clone()
+            # Set.getItem raises rather than returning None for a row
+            # it cannot find, so check membership first - a micId just
+            # discovered via getIdSet() may not be selectable yet under
+            # a PostgreSQL-backed compatibility bridge.
+            mic = None
+            for attempt in range(self.MIC_VISIBILITY_MAX_ATTEMPTS):
+                if attempt > 0:
+                    time.sleep(self.MIC_VISIBILITY_RETRY_DELAY)
+                    inputMicSet = self._loadInputSet(self.inputFn)
+
+                if micId in inputMicSet:
+                    mic = inputMicSet.getItem("id", micId).clone()
+                    break
+
+            if mic is None:
+                self.error(
+                    "Micrograph with id %d never became visible in the "
+                    "input Set after %d attempts; excluding it from "
+                    "this batch." % (micId, self.MIC_VISIBILITY_MAX_ATTEMPTS)
+                )
+                continue
+
             micName = mic.getFileName()
             micFnOrig = os.path.abspath(micName)
             micDest = os.path.join(batchDirTmp, os.path.basename(micName))

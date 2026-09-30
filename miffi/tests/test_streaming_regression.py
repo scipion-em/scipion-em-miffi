@@ -4,6 +4,7 @@
 # *
 # ***************************************************************************
 
+import os
 import unittest
 from datetime import datetime
 from unittest.mock import patch
@@ -221,6 +222,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def getSize(self):
                     return 2
 
+                def __contains__(self, objId):
+                    return True
+
                 def getItem(self, field, objId):
                     assert field == "id"
                     return _Image(objId)
@@ -353,6 +357,134 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
             )
             self.assertIn(2, protocol.processedIds)
 
+    def testCheckNewOutputSkipsImageNotYetVisibleWithoutCrashing(self):
+        # Regression test: Set.getItem raises (UnboundLocalError) rather
+        # than returning None for a row it cannot find. An imageId
+        # already in processedIds (because its batch step already
+        # succeeded) may still momentarily fail to be selectable from a
+        # freshly-reloaded input Set - it must be skipped (and logged)
+        # instead of crashing the whole protocol, while the rest of the
+        # batch is still processed normally.
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            firstPkl = os.path.join(tmp, "batch_1_dict.pkl")
+            firstLog = os.path.join(tmp, "batch_1.log")
+            with open(firstPkl, "wb") as handle:
+                pickle.dump({miffi_module.GOOD: ["mic_1.mrc"]}, handle)
+            with open(firstLog, "w") as handle:
+                handle.write("")
+
+            class _Summary:
+                def __init__(self):
+                    self.value = ""
+
+                def set(self, value):
+                    self.value = value
+
+            class _Image:
+                def __init__(self, objId):
+                    self.objId = objId
+
+                def clone(self):
+                    return _Image(self.objId)
+
+                def getFileName(self):
+                    return os.path.join(tmp, f"mic_{self.objId}.mrc")
+
+            class _Input:
+                def __init__(self, visibleIds):
+                    self._visibleIds = visibleIds
+
+                def getSize(self):
+                    return len(self._visibleIds)
+
+                def __contains__(self, objId):
+                    return objId in self._visibleIds
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    return _Image(objId)
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1, 2]  # id 2 will not be visible
+                    self.outputCategorizeFiles = [firstPkl]
+                    self.outputCategorizeLogFiles = [firstLog]
+                    self.isStreamClosed = True
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = object()
+                    self.errors = []
+                    self.appended = []
+                    self._inputClass = _Image
+                    self._baseName = "micrographs.sqlite"
+
+                def _getAllDoneIds(self):
+                    return [], 0, [], []
+
+                def _loadInputSet(self, inputFn):
+                    return _Input(visibleIds={1})
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _getFirstJoinStep(self):
+                    return None
+
+                def _store(self):
+                    pass
+
+                def error(self, msg):
+                    self.errors.append(msg)
+
+                def info(self, *args, **kwargs):
+                    pass
+
+                def _loadOutputSet(self, SetClass, baseName, outputName=None):
+                    outSet = self
+                    return outSet
+
+                def append(self, image):
+                    self.appended.append(image.objId)
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    pass
+
+                def _defineSourceRelation(self, *args, **kwargs):
+                    pass
+
+            protocol = _Harness()
+
+            miffi_module.MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                1,
+                len(protocol.errors),
+                "The invisible image must be logged, not silently ignored.",
+            )
+            self.assertEqual(
+                [1],
+                protocol.appended,
+                "The still-visible image must still be processed normally.",
+            )
+
 
 class _ExistingOutputSet:
     def __init__(self):
@@ -395,6 +527,104 @@ class TestMiffiLoadOutputSetRegression(unittest.TestCase):
         self.assertIs(existingOutputSet, outputSet)
         self.assertEqual(1, existingOutputSet.enableAppendCalls)
         self.assertIs(inputs, existingOutputSet.copiedFrom)
+
+
+class _FakeMic:
+    def __init__(self, objId, tmp):
+        self._objId = objId
+        self._tmp = tmp
+
+    def clone(self):
+        return _FakeMic(self._objId, self._tmp)
+
+    def getFileName(self):
+        micFn = os.path.join(self._tmp, "mic_%d.mrc" % self._objId)
+        if not os.path.exists(micFn):
+            with open(micFn, "w"):
+                pass
+        return micFn
+
+
+class _FakeMicSet:
+    def __init__(self, ids, tmp):
+        self._ids = set(ids)
+        self._tmp = tmp
+
+    def __contains__(self, micId):
+        return micId in self._ids
+
+    def getItem(self, field, micId):
+        assert field == "id"
+        # Real Set.getItem raises (UnboundLocalError) rather than
+        # returning None for a row it cannot find - match that here so a
+        # missing membership guard is caught by these tests.
+        if micId not in self._ids:
+            raise UnboundLocalError("row not found for id %r" % micId)
+        return _FakeMic(micId, self._tmp)
+
+
+class _PrepareBatchHarness:
+    MIC_VISIBILITY_MAX_ATTEMPTS = 3
+    MIC_VISIBILITY_RETRY_DELAY = 0
+
+    def __init__(self, tmp, inputSet):
+        self._tmp = tmp
+        self._inputSet = inputSet
+        self.inputFn = "/tmp/fake_mics.sqlite"
+        self.errors = []
+
+    def _getTmpPath(self, name):
+        return os.path.join(self._tmp, name)
+
+    def _loadInputSet(self, inputFn):
+        return self._inputSet
+
+    def error(self, msg):
+        self.errors.append(msg)
+
+
+class TestMiffiPrepareBatchVisibilityRegression(unittest.TestCase):
+    """Regression tests for Set.getItem visibility handling in prepareBatch."""
+
+    def testPrepareBatchRetriesUntilMicBecomesVisible(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inputSet = _FakeMicSet(ids=[], tmp=tmp)  # mic 1 starts invisible
+            harness = _PrepareBatchHarness(tmp, inputSet)
+
+            def becomeVisibleOnSleep(_delay):
+                inputSet._ids = {1}
+
+            with patch(
+                "miffi.protocols.protocol_miffi.time.sleep",
+                side_effect=becomeVisibleOnSleep,
+            ):
+                batchDir = MiffiProtMicrographs.prepareBatch(harness, [1], 1)
+
+            self.assertEqual([], harness.errors)
+            copiedFiles = os.listdir(batchDir)
+            self.assertEqual(["mic_1.mrc"], copiedFiles)
+
+    def testPrepareBatchExcludesMicThatNeverBecomesVisible(self):
+        # Regression test: Set.getItem raises (UnboundLocalError) rather
+        # than returning None for a row it cannot find. A micId that
+        # never becomes visible must be excluded from the batch (and
+        # logged) instead of crashing the whole one-shot worker step.
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inputSet = _FakeMicSet(ids=[], tmp=tmp)  # never becomes visible
+            harness = _PrepareBatchHarness(tmp, inputSet)
+
+            with patch(
+                "miffi.protocols.protocol_miffi.time.sleep",
+                return_value=None,
+            ):
+                batchDir = MiffiProtMicrographs.prepareBatch(harness, [1], 1)
+
+            self.assertEqual(1, len(harness.errors))
+            self.assertEqual([], os.listdir(batchDir))
 
 
 if __name__ == "__main__":
