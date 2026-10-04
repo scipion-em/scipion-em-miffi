@@ -42,7 +42,7 @@ import matplotlib.pyplot as plt
 from pyworkflow.protocol import STEPS_PARALLEL
 import pyworkflow.protocol.params as params
 from pyworkflow.utils import prettyTime, Message
-from pyworkflow.utils.path import makePath, copyFile, copyTree
+from pyworkflow.utils.path import makePath, copyFile, copyTree, cleanPath
 from pwem.objects import SetOfMicrographs, Set, String
 from pwem.protocols import EMProtocol, ProtPreprocessMicrographs
 from pyworkflow.protocol.constants import STATUS_NEW, LEVEL_ADVANCED
@@ -304,19 +304,19 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             self.outputCategorizeLogFiles = []
 
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
-        allDone = len(doneListIds) + len(newDone)
-        maxSize = self._loadInputSet(self.inputFn).getSize()
-        # We have finished when there is not more input images
-        # (stream closed) or when the limit of output size is met
-        self.finished = self.isStreamClosed and allDone == maxSize
-        streamMode = Set.STREAM_CLOSED if self.finished else Set.STREAM_OPEN
-
-        if not self.finished and not newDone:
-            # If we are not finished and no new output have been produced
-            # it does not make sense to proceed and updated the outputs
-            # so we exit from the function here
-            return
         inputSet = self._loadInputSet(self.inputFn)
+        maxSize = inputSet.getSize()
+        self.finished = self.isStreamClosed and len(set(doneListIds)) == maxSize
+
+        if not newDone:
+            if self.finished:
+                outputStep = self._getFirstJoinStep()
+                if outputStep and outputStep.isWaiting():
+                    outputStep.setStatus(STATUS_NEW)
+            self._store()
+            return
+
+        streamMode = Set.STREAM_OPEN
 
         categorized_micrographs = defaultdict(list)
         accepted = {}
@@ -373,14 +373,25 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         if accepted:
             self._updateOutputSet(OUTPUT, outputSet, streamMode)
+            outputSet = getattr(self, OUTPUT, outputSet)
             if self.firstTime[OUTPUT]:
                 self._defineSourceRelation(self.inputSet, outputSet)
                 self.firstTime[OUTPUT] = False
         if rejected:
             self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+            outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
             if self.firstTime[OUTPUT_DISCARDED]:
                 self._defineSourceRelation(self.inputSet, outputSetDiscarded)
                 self.firstTime[OUTPUT_DISCARDED] = False
+
+        persistedDoneIds, _, _, _ = self._getAllDoneIds()
+        pendingIds = set(newDone).difference(persistedDoneIds)
+        self.finished = self.isStreamClosed and len(set(persistedDoneIds)) == maxSize
+
+        if pendingIds:
+            with resultsLock:
+                self.outputCategorizeFiles = outputCategorizeFiles + self.outputCategorizeFiles
+                self.outputCategorizeLogFiles = outputCategorizeLogFiles + self.outputCategorizeLogFiles
 
         # === Display the results ===
         all_labels = {**accepted, **rejected}
@@ -429,17 +440,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         # discarded and replaced with an empty fresh Set.
         outputSet = getattr(self, outputName, None) if outputName else None
         if outputSet is not None:
+            outputSet.loadAllProperties()
             outputSet.enableAppend()
         else:
             setFile = self._getPath(baseName)
-
-            if os.path.exists(setFile):
-                outputSet = SetClass(filename=setFile)
-                outputSet.loadAllProperties()
-                outputSet.enableAppend()
-            else:
-                outputSet = SetClass(filename=setFile)
-                outputSet.setStreamState(outputSet.STREAM_OPEN)
+            cleanPath(setFile)
+            outputSet = SetClass(filename=setFile)
+            outputSet.setStreamState(outputSet.STREAM_OPEN)
 
         inputs = self.inputSet.get()
         outputSet.copyInfo(inputs)
@@ -532,6 +539,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def runMiffiInference(self, batchDir, numPass):
         outDir = self._getExtraPath('micBatch%d' % numPass)
+        cleanPath(outDir)
         makePath(outDir)
         params = self._getInferenceParams(batchDir, outDir)
         program = Plugin.getProgram('miffi')
@@ -567,11 +575,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         sizeOutput = 0
 
         if hasattr(self, OUTPUT):
+            self.outputMicrographs.loadAllProperties()
             sizeOutput += self.outputMicrographs.getSize()
             acceptedIds.extend(list(self.outputMicrographs.getIdSet()))
             doneIds.extend(acceptedIds)
 
         if hasattr(self, OUTPUT_DISCARDED):
+            self.outputMicrographsDiscarded.loadAllProperties()
             sizeOutput += self.outputMicrographsDiscarded.getSize()
             discardedIds.extend(list(self.outputMicrographsDiscarded.getIdSet()))
             doneIds.extend(discardedIds)

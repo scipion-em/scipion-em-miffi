@@ -489,7 +489,11 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
 class _ExistingOutputSet:
     def __init__(self):
         self.enableAppendCalls = 0
+        self.loadAllPropertiesCalls = 0
         self.copiedFrom = None
+
+    def loadAllProperties(self):
+        self.loadAllPropertiesCalls += 1
 
     def enableAppend(self):
         self.enableAppendCalls += 1
@@ -525,6 +529,7 @@ class TestMiffiLoadOutputSetRegression(unittest.TestCase):
             )
 
         self.assertIs(existingOutputSet, outputSet)
+        self.assertEqual(1, existingOutputSet.loadAllPropertiesCalls)
         self.assertEqual(1, existingOutputSet.enableAppendCalls)
         self.assertIs(inputs, existingOutputSet.copiedFrom)
 
@@ -629,3 +634,315 @@ class TestMiffiPrepareBatchVisibilityRegression(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _RefreshRequiredMiffiOutput:
+    def __init__(self, ids):
+        self.ids = set(ids)
+        self.loaded = False
+        self.appendEnabled = False
+        self.copiedFrom = None
+
+    def loadAllProperties(self):
+        self.loaded = True
+
+    def getSize(self):
+        if not self.loaded:
+            raise AssertionError("Persisted MIFFI output must be refreshed before reading its size.")
+        return len(self.ids)
+
+    def getIdSet(self):
+        if not self.loaded:
+            raise AssertionError("Persisted MIFFI output must be refreshed before reading its ids.")
+        return set(self.ids)
+
+    def enableAppend(self):
+        if not self.loaded:
+            raise AssertionError("Persisted MIFFI output must be refreshed before enableAppend().")
+        self.appendEnabled = True
+
+    def copyInfo(self, inputs):
+        self.copiedFrom = inputs
+
+
+class TestMiffiPersistedOutputRefresh(unittest.TestCase):
+    def testDoneIdsRefreshPersistedAcceptedAndDiscardedOutputs(self):
+        class Harness:
+            def __init__(self):
+                self.outputMicrographs = _RefreshRequiredMiffiOutput([1, 2])
+                self.outputMicrographsDiscarded = _RefreshRequiredMiffiOutput([3])
+
+        protocol = Harness()
+        doneIds, sizeOutput, acceptedIds, discardedIds = MiffiProtMicrographs._getAllDoneIds(protocol)
+
+        self.assertEqual({1, 2, 3}, set(doneIds))
+        self.assertEqual(3, sizeOutput)
+        self.assertEqual({1, 2}, set(acceptedIds))
+        self.assertEqual({3}, set(discardedIds))
+        self.assertTrue(protocol.outputMicrographs.loaded)
+        self.assertTrue(protocol.outputMicrographsDiscarded.loaded)
+
+    def testLoadOutputSetRefreshesExistingLogicalOutputBeforeAppend(self):
+        existingOutput = _RefreshRequiredMiffiOutput([1])
+        inputs = object()
+
+        class Harness:
+            def __init__(self):
+                self.outputMicrographs = existingOutput
+                self.inputSet = _Pointer(inputs)
+
+        protocol = Harness()
+        outputSet = MiffiProtMicrographs._loadOutputSet(protocol, object, "micrographs.sqlite", outputName=miffi_module.OUTPUT)
+
+        self.assertIs(existingOutput, outputSet)
+        self.assertTrue(existingOutput.loaded)
+        self.assertTrue(existingOutput.appendEnabled)
+        self.assertIs(inputs, existingOutput.copiedFrom)
+
+
+class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
+    def testProcessedButUnpersistedIdDoesNotCloseStreaming(self):
+        import threading
+        from collections import defaultdict
+
+        class _Summary:
+            def set(self, value):
+                pass
+
+        class _Input:
+            def getSize(self):
+                return 2
+
+            def __contains__(self, objId):
+                return objId == 1
+
+        class _JoinStep:
+            def __init__(self):
+                self.status = None
+
+            def isWaiting(self):
+                return True
+
+            def setStatus(self, status):
+                self.status = status
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.processedIds = [2]
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = True
+                self.inputFn = "logical-input"
+                self.acceptedLabels = [miffi_module.GOOD]
+                self.rejectedLabels = []
+                self.firstTime = {miffi_module.OUTPUT: True, miffi_module.OUTPUT_DISCARDED: True}
+                self.labelHistory = defaultdict(list)
+                self.timeHistory = []
+                self.outputLog = {}
+                self.summaryVar = _Summary()
+                self.inputSet = object()
+                self.finished = False
+                self.errors = []
+                self.joinStep = _JoinStep()
+
+            def _getAllDoneIds(self):
+                return [1], 1, [1], []
+
+            def _loadInputSet(self, inputFn):
+                return _Input()
+
+            def _plotMiffiLabelHistogram(self):
+                pass
+
+            def _plotMiffiTimeEvolution(self):
+                pass
+
+            def _getFirstJoinStep(self):
+                return self.joinStep
+
+            def _store(self):
+                pass
+
+            def error(self, message):
+                self.errors.append(message)
+
+        protocol = _Harness()
+
+        with patch.object(miffi_module, "populate_and_update_categories", return_value={}):
+            MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertFalse(protocol.finished, "A processed id must not make the protocol terminal until it is durably present in an output Set.")
+        self.assertIsNone(protocol.joinStep.status, "The final join step must remain waiting while any processed id is still unpersisted.")
+
+
+class TestMiffiOutputIdentityRegression(unittest.TestCase):
+    def testBackingFileDoesNotBecomeDurableOutputIdentity(self):
+        class _FreshOutput:
+            STREAM_OPEN = 1
+
+            def __init__(self, filename=None):
+                self.filename = filename
+                self.loaded = False
+                self.streamState = None
+                self.copiedFrom = None
+
+            def loadAllProperties(self):
+                self.loaded = True
+                raise AssertionError("A backing file must not restore an output that is absent from the logical protocol outputs.")
+
+            def setStreamState(self, state):
+                self.streamState = state
+
+            def copyInfo(self, inputs):
+                self.copiedFrom = inputs
+
+        inputs = object()
+
+        class Harness:
+            def __init__(self):
+                self.inputSet = _Pointer(inputs)
+
+            def _getPath(self, name):
+                return "/tmp/" + name
+
+        protocol = Harness()
+
+        with patch.object(miffi_module, "cleanPath") as cleanPathMock:
+            outputSet = MiffiProtMicrographs._loadOutputSet(protocol, _FreshOutput, "micrographs.sqlite", outputName=miffi_module.OUTPUT)
+
+        cleanPathMock.assert_called_once_with("/tmp/micrographs.sqlite")
+        self.assertFalse(outputSet.loaded)
+        self.assertEqual(_FreshOutput.STREAM_OPEN, outputSet.streamState)
+        self.assertIs(inputs, outputSet.copiedFrom)
+
+
+class TestMiffiBatchWorkspaceRegression(unittest.TestCase):
+    def testInferenceCleansReusedBatchWorkspaceBeforeRunning(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            outDir = os.path.join(tmp, "micBatch1")
+            os.makedirs(outDir)
+            staleFile = os.path.join(outDir, "stale.pkl")
+            with open(staleFile, "w") as handle:
+                handle.write("stale")
+
+            class Harness:
+                def _getExtraPath(self, name):
+                    return os.path.join(tmp, name)
+
+                def _getInferenceParams(self, batchDir, outDir):
+                    return "params"
+
+                def runJob(self, program, params, env=None, numberOfThreads=None):
+                    if os.path.exists(staleFile):
+                        raise AssertionError("Reused MIFFI batch workspace must be cleaned before inference.")
+                    with open(os.path.join(outDir, "fresh.pkl"), "w") as handle:
+                        handle.write("fresh")
+
+            protocol = Harness()
+
+            with patch.object(miffi_module.Plugin, "getProgram", return_value="miffi"), patch.object(miffi_module.Plugin, "getEnviron", return_value={}):
+                result = MiffiProtMicrographs.runMiffiInference(protocol, "/tmp/input-batch", 1)
+
+            self.assertEqual(os.path.join(outDir, "fresh.pkl"), result)
+
+
+class TestMiffiCanonicalOutputRegression(unittest.TestCase):
+    def testSourceRelationUsesCanonicalPublishedOutput(self):
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch.pkl")
+            logFile = os.path.join(tmp, "batch.log")
+            with open(pklFile, "wb") as handle:
+                pickle.dump({miffi_module.GOOD: ["mic_1.mrc"]}, handle)
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Summary:
+                def set(self, value):
+                    pass
+
+            class _Image:
+                def clone(self):
+                    return self
+
+                def getFileName(self):
+                    return os.path.join(tmp, "mic_1.mrc")
+
+            class _Input:
+                def getSize(self):
+                    return 1
+
+                def __contains__(self, objId):
+                    return objId == 1
+
+                def getItem(self, field, objId):
+                    return _Image()
+
+            class _Output:
+                def append(self, image):
+                    pass
+
+            class Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = True
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {miffi_module.OUTPUT: True, miffi_module.OUTPUT_DISCARDED: True}
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = object()
+                    self._inputClass = object
+                    self._baseName = "micrographs.sqlite"
+                    self.provisional = _Output()
+                    self.canonical = _Output()
+                    self.relationTarget = None
+                    self.doneCalls = 0
+
+                def _getAllDoneIds(self):
+                    self.doneCalls += 1
+                    return ([], 0, [], []) if self.doneCalls == 1 else ([1], 1, [1], [])
+
+                def _loadInputSet(self, inputFn):
+                    return _Input()
+
+                def _loadOutputSet(self, SetClass, baseName, outputName=None):
+                    return self.provisional
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    setattr(self, outputName, self.canonical)
+
+                def _defineSourceRelation(self, source, target):
+                    self.relationTarget = target
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _getFirstJoinStep(self):
+                    return None
+
+                def _store(self):
+                    pass
+
+            protocol = Harness()
+
+            with patch.object(miffi_module, "populate_and_update_categories", return_value={}):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertIs(protocol.canonical, protocol.relationTarget, "Source relations must target the canonical output published by the runtime.")
