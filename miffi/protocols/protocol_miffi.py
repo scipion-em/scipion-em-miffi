@@ -305,6 +305,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             self.outputCategorizeFiles = []
             self.outputCategorizeLogFiles = []
 
+        def requeuePendingResults():
+            with resultsLock:
+                self.outputCategorizeFiles = (
+                    outputCategorizeFiles + self.outputCategorizeFiles
+                )
+                self.outputCategorizeLogFiles = (
+                    outputCategorizeLogFiles + self.outputCategorizeLogFiles
+                )
+
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
         inputSet = self._loadInputSet(self.inputFn)
         maxSize = inputSet.getSize()
@@ -371,27 +380,29 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                 setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
                 outputSetDiscarded.append(image)
 
-        if accepted:
-            self._updateOutputSet(OUTPUT, outputSet, streamMode)
-            outputSet = getattr(self, OUTPUT, outputSet)
-            if self.firstTime[OUTPUT]:
-                self._defineSourceRelation(self.inputSet, outputSet)
-                self.firstTime[OUTPUT] = False
-        if rejected:
-            self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
-            outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
-            if self.firstTime[OUTPUT_DISCARDED]:
-                self._defineSourceRelation(self.inputSet, outputSetDiscarded)
-                self.firstTime[OUTPUT_DISCARDED] = False
+        try:
+            if accepted:
+                self._updateOutputSet(OUTPUT, outputSet, streamMode)
+                outputSet = getattr(self, OUTPUT, outputSet)
+                if self.firstTime[OUTPUT]:
+                    self._defineSourceRelation(self.inputSet, outputSet)
+                    self.firstTime[OUTPUT] = False
+            if rejected:
+                self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+                outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
+                if self.firstTime[OUTPUT_DISCARDED]:
+                    self._defineSourceRelation(self.inputSet, outputSetDiscarded)
+                    self.firstTime[OUTPUT_DISCARDED] = False
+        except Exception:
+            requeuePendingResults()
+            raise
 
         persistedDoneIds, _, _, _ = self._getAllDoneIds()
         pendingIds = set(newDone).difference(persistedDoneIds)
         self.finished = self.isStreamClosed and len(set(persistedDoneIds)) == maxSize
 
         if pendingIds:
-            with resultsLock:
-                self.outputCategorizeFiles = outputCategorizeFiles + self.outputCategorizeFiles
-                self.outputCategorizeLogFiles = outputCategorizeLogFiles + self.outputCategorizeLogFiles
+            requeuePendingResults()
 
         # === Display the results ===
         all_labels = {**accepted, **rejected}
