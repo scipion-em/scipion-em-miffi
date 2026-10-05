@@ -343,11 +343,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         # Load output sets
         if accepted:
-            outputSet = self._loadOutputSet(self._inputClass, self._baseName,
-                                            outputName=OUTPUT)
+            outputSet = self._loadOutputSet(OUTPUT)
         if rejected:
-            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite',
-                                                      outputName=OUTPUT_DISCARDED)
+            outputSetDiscarded = self._loadOutputSet(OUTPUT_DISCARDED, suffix="_discarded")
 
         # Assign micrographs to their sets with attributes
         for imageId in newDone:
@@ -433,24 +431,16 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         inputSet.loadAllProperties()
         return inputSet
 
-    def _loadOutputSet(self, SetClass, baseName, outputName=None):
-        # Reuse the logical output Scipion already knows about before
-        # falling back to the on-disk backing file, otherwise an output
-        # still awaiting its backing file to materialize would be silently
-        # discarded and replaced with an empty fresh Set.
-        outputSet = getattr(self, outputName, None) if outputName else None
+    def _loadOutputSet(self, outputName, suffix=""):
+        outputSet = getattr(self, outputName, None)
         if outputSet is not None:
             outputSet.loadAllProperties()
             outputSet.enableAppend()
         else:
-            setFile = self._getPath(baseName)
-            cleanPath(setFile)
-            outputSet = SetClass(filename=setFile)
+            outputSet = self._createSetOfMicrographs(suffix=suffix)
             outputSet.setStreamState(outputSet.STREAM_OPEN)
 
-        inputs = self.inputSet.get()
-        outputSet.copyInfo(inputs)
-
+        outputSet.copyInfo(self.inputSet.get())
         return outputSet
 
     def _insertNewImageSteps(self, newIds, batchSize):

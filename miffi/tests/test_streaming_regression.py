@@ -457,9 +457,8 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def info(self, *args, **kwargs):
                     pass
 
-                def _loadOutputSet(self, SetClass, baseName, outputName=None):
-                    outSet = self
-                    return outSet
+                def _loadOutputSet(self, outputName, suffix=""):
+                    return self
 
                 def append(self, image):
                     self.appended.append(image.objId)
@@ -522,11 +521,7 @@ class TestMiffiLoadOutputSetRegression(unittest.TestCase):
 
         protocol = _Harness()
 
-        with patch.object(miffi_module.os.path, "exists", return_value=False):
-            outputSet = MiffiProtMicrographs._loadOutputSet(
-                protocol, object, "micrographs.dat",
-                outputName=miffi_module.OUTPUT,
-            )
+        outputSet = MiffiProtMicrographs._loadOutputSet(protocol, miffi_module.OUTPUT)
 
         self.assertIs(existingOutputSet, outputSet)
         self.assertEqual(1, existingOutputSet.loadAllPropertiesCalls)
@@ -692,7 +687,7 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 self.inputSet = _Pointer(inputs)
 
         protocol = Harness()
-        outputSet = MiffiProtMicrographs._loadOutputSet(protocol, object, "micrographs.sqlite", outputName=miffi_module.OUTPUT)
+        outputSet = MiffiProtMicrographs._loadOutputSet(protocol, miffi_module.OUTPUT)
 
         self.assertIs(existingOutput, outputSet)
         self.assertTrue(existingOutput.loaded)
@@ -802,16 +797,19 @@ class TestMiffiOutputIdentityRegression(unittest.TestCase):
         class Harness:
             def __init__(self):
                 self.inputSet = _Pointer(inputs)
+                self.created = 0
+
+            def _createSetOfMicrographs(self, suffix=""):
+                self.created += 1
+                return _FreshOutput()
 
             def _getPath(self, name):
-                return "/tmp/" + name
+                raise AssertionError("Backing-file paths must not define MIFFI output identity.")
 
         protocol = Harness()
+        outputSet = MiffiProtMicrographs._loadOutputSet(protocol, miffi_module.OUTPUT)
 
-        with patch.object(miffi_module, "cleanPath") as cleanPathMock:
-            outputSet = MiffiProtMicrographs._loadOutputSet(protocol, _FreshOutput, "micrographs.sqlite", outputName=miffi_module.OUTPUT)
-
-        cleanPathMock.assert_called_once_with("/tmp/micrographs.sqlite")
+        self.assertEqual(1, protocol.created)
         self.assertFalse(outputSet.loaded)
         self.assertEqual(_FreshOutput.STREAM_OPEN, outputSet.streamState)
         self.assertIs(inputs, outputSet.copiedFrom)
@@ -919,7 +917,7 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
                 def _loadInputSet(self, inputFn):
                     return _Input()
 
-                def _loadOutputSet(self, SetClass, baseName, outputName=None):
+                def _loadOutputSet(self, outputName, suffix=""):
                     return self.provisional
 
                 def _updateOutputSet(self, outputName, outputSet, streamMode):
@@ -946,3 +944,44 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
                 MiffiProtMicrographs._checkNewOutput(protocol)
 
             self.assertIs(protocol.canonical, protocol.relationTarget, "Source relations must target the canonical output published by the runtime.")
+
+
+class TestMiffiScipionOutputFactoryRegression(unittest.TestCase):
+    def testNewOutputsUseScipionMicrographFactoryInsteadOfBackingFileNames(self):
+        class _FreshOutput:
+            STREAM_OPEN = 1
+
+            def __init__(self):
+                self.streamState = None
+                self.copiedFrom = None
+
+            def setStreamState(self, state):
+                self.streamState = state
+
+            def copyInfo(self, inputs):
+                self.copiedFrom = inputs
+
+        inputs = object()
+
+        class Harness:
+            def __init__(self):
+                self.inputSet = _Pointer(inputs)
+                self.createdSuffixes = []
+
+            def _createSetOfMicrographs(self, suffix=''):
+                self.createdSuffixes.append(suffix)
+                return _FreshOutput()
+
+            def _getPath(self, name):
+                raise AssertionError("MIFFI must not choose physical backing filenames for logical outputs.")
+
+        protocol = Harness()
+
+        accepted = MiffiProtMicrographs._loadOutputSet(protocol, miffi_module.OUTPUT)
+        discarded = MiffiProtMicrographs._loadOutputSet(protocol, miffi_module.OUTPUT_DISCARDED, suffix="_discarded")
+
+        self.assertEqual(["", "_discarded"], protocol.createdSuffixes)
+        self.assertEqual(_FreshOutput.STREAM_OPEN, accepted.streamState)
+        self.assertEqual(_FreshOutput.STREAM_OPEN, discarded.streamState)
+        self.assertIs(inputs, accepted.copiedFrom)
+        self.assertIs(inputs, discarded.copiedFrom)
