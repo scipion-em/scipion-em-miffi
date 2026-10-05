@@ -858,6 +858,32 @@ class TestMiffiBatchWorkspaceRegression(unittest.TestCase):
             self.assertEqual(os.path.join(outDir, "fresh.pkl"), result)
 
 
+    def testPrepareBatchCleansReusedTemporaryWorkspace(self):
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            batchDir = os.path.join(tmp, "micBatch1")
+            os.makedirs(batchDir)
+            staleMic = os.path.join(batchDir, "stale.mrc")
+            with open(staleMic, "w") as handle:
+                handle.write("stale")
+
+            inputSet = _FakeMicSet(ids=[2], tmp=tmp)
+            harness = _PrepareBatchHarness(tmp, inputSet)
+
+            preparedDir, preparedIds = MiffiProtMicrographs._prepareBatchWithIds(
+                harness, [2], 1
+            )
+
+            self.assertEqual(batchDir, preparedDir)
+            self.assertEqual([2], preparedIds)
+            self.assertEqual(
+                ["mic_2.mrc"],
+                sorted(os.listdir(preparedDir)),
+                "A reused temporary MIFFI batch directory must not retain micrographs from a previous run.",
+            )
+
+
 class TestMiffiCanonicalOutputRegression(unittest.TestCase):
     def testSourceRelationUsesCanonicalPublishedOutput(self):
         import pickle

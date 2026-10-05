@@ -513,6 +513,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def _prepareBatchWithIds(self, newIds, counterBatch):
         batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
+        cleanPath(batchDirTmp)
         makePath(batchDirTmp)
         inputMicSet = self._loadInputSet(self.inputFn)
         preparedIds = []
