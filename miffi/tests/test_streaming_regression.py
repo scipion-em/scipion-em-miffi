@@ -133,6 +133,24 @@ class TestMiffiStreamingRegression(unittest.TestCase):
         self.assertEqual(protocol.logicalInput.loadCalls, 1)
         self.assertEqual(protocol.logicalInput.loadPropertiesCalls, 1)
 
+    def testReleasedLateVisibleIdBypassesNoChangeShortcut(self):
+        protocol = _StreamingHarness()
+
+        # Represents the state after mic 1 was already discovered but a
+        # worker could not select it yet and released it from insertedIds.
+        # Mic 2 remains scheduled, so insertedIds is still non-empty.
+        protocol.insertedIds = [2]
+        protocol.logicalInput.hasChangedSince = lambda _lastCheck: False
+
+        MiffiProtMicrographs._checkNewInput(protocol)
+
+        self.assertEqual(
+            [[1]],
+            protocol.insertedBatches,
+            "A previously discovered mic released for a visibility retry "
+            "must not be hidden by the no-change shortcut.",
+        )
+
 
 class _FailingBatchHarness:
     def __init__(self):

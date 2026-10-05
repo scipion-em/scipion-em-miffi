@@ -252,7 +252,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.debug('Last check: %s' % prettyTime(self.lastCheck))
 
         if self.insertedIds and not inputSetRef.hasChangedSince(self.lastCheck):
-            return None
+            knownInputIds = inputSetRef.getIdSet()
+            if not set(knownInputIds).difference(self.insertedIds):
+                return None
 
         inputSet = self._loadInputSet(self.inputFn)
         inputSetIds = inputSet.getIdSet()
