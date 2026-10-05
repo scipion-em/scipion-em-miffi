@@ -463,12 +463,30 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def miffStep(self, newIds, counterBatch):
         """ Call miff with the appropriate parameters. """
-        batchDirTmp = self.prepareBatch(newIds, counterBatch)
+        batchDirTmp, preparedIds = self._prepareBatchWithIds(newIds, counterBatch)
+        missingIds = set(newIds).difference(preparedIds)
+
+        if missingIds:
+            resultsLock = getattr(self, '_lock', None)
+            if resultsLock is None:
+                # Lightweight regression harnesses do not instantiate Protocol.
+                resultsLock = self._resultsLock
+
+            with resultsLock:
+                self.insertedIds = [
+                    imageId for imageId in self.insertedIds
+                    if imageId not in missingIds
+                ]
+
         try:
+            if not preparedIds:
+                return
+
             inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
             categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(
                 counterBatch, inference_output_file
             )
+
             resultsLock = getattr(self, '_lock', None)
             if resultsLock is None:
                 # Lightweight regression harnesses do not instantiate Protocol.
@@ -477,7 +495,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             with resultsLock:
                 self.outputCategorizeFiles.append(categorize_output_file)
                 self.outputCategorizeLogFiles.append(categorize_output_log_file)
-                self.processedIds.extend(newIds)
+                self.processedIds.extend(preparedIds)
         except Exception as e:
             self.info('Batch number %d had problems with miffi execution' % counterBatch)
             self.info(e)
@@ -490,9 +508,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             self.delayRegister()
 
     def prepareBatch(self, newIds, counterBatch):
+        batchDirTmp, _ = self._prepareBatchWithIds(newIds, counterBatch)
+        return batchDirTmp
+
+    def _prepareBatchWithIds(self, newIds, counterBatch):
         batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
         makePath(batchDirTmp)
         inputMicSet = self._loadInputSet(self.inputFn)
+        preparedIds = []
 
         for micId in newIds:
             # Set.getItem raises rather than returning None for a row
@@ -512,8 +535,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             if mic is None:
                 self.error(
                     "Micrograph with id %d never became visible in the "
-                    "input Set after %d attempts; excluding it from "
-                    "this batch." % (micId, self.MIC_VISIBILITY_MAX_ATTEMPTS)
+                    "input Set after %d attempts; leaving it pending "
+                    "for a later streaming poll."
+                    % (micId, self.MIC_VISIBILITY_MAX_ATTEMPTS)
                 )
                 continue
 
@@ -521,8 +545,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             micFnOrig = os.path.abspath(micName)
             micDest = os.path.join(batchDirTmp, os.path.basename(micName))
             copyFile(micFnOrig, micDest)
+            preparedIds.append(micId)
 
-        return batchDirTmp
+        return batchDirTmp, preparedIds
 
     def copyMiffiOutput(self, numPass):
         copyTree(self._getTmpPath('output%s' % numPass), self._getExtraPath('MicAssess'))

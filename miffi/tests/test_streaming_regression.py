@@ -146,6 +146,9 @@ class _FailingBatchHarness:
     def prepareBatch(self, newIds, counterBatch):
         return "/tmp/miffi-failing-batch"
 
+    def _prepareBatchWithIds(self, newIds, counterBatch):
+        return self.prepareBatch(newIds, counterBatch), list(newIds)
+
     def runMiffiInference(self, batchDir, counterBatch):
         raise RuntimeError("simulated MIFFI failure")
 
@@ -269,6 +272,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
 
                 def prepareBatch(self, newIds, counterBatch):
                     return os.path.join(tmp, f"batch_{counterBatch}")
+
+                def _prepareBatchWithIds(self, newIds, counterBatch):
+                    return self.prepareBatch(newIds, counterBatch), list(newIds)
 
                 def runMiffiInference(self, batchDir, counterBatch):
                     return "inference.pkl"
@@ -578,6 +584,11 @@ class _PrepareBatchHarness:
 
     def _loadInputSet(self, inputFn):
         return self._inputSet
+
+    def _prepareBatchWithIds(self, newIds, counterBatch):
+        return MiffiProtMicrographs._prepareBatchWithIds(
+            self, newIds, counterBatch
+        )
 
     def error(self, msg):
         self.errors.append(msg)
@@ -985,3 +996,125 @@ class TestMiffiScipionOutputFactoryRegression(unittest.TestCase):
         self.assertEqual(_FreshOutput.STREAM_OPEN, discarded.streamState)
         self.assertIs(inputs, accepted.copiedFrom)
         self.assertIs(inputs, discarded.copiedFrom)
+class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
+    def testInvisibleMicIsNotMarkedProcessedAndCanBeScheduledAgain(self):
+        import tempfile
+        import threading
+        from pathlib import Path
+
+        class _InputSet:
+            def __init__(self, tmp):
+                self._ids = set()
+                self._tmp = tmp
+                self.closed = False
+
+            def __contains__(self, micId):
+                return micId in self._ids
+
+            def getItem(self, field, micId):
+                assert field == "id"
+                if micId not in self._ids:
+                    raise UnboundLocalError("row not found for id %r" % micId)
+                return _FakeMic(micId, self._tmp)
+
+            def getIdSet(self):
+                return set(self._ids)
+
+            def isStreamClosed(self):
+                return True
+
+            def close(self):
+                self.closed = True
+
+            def hasChangedSince(self, _lastCheck):
+                return True
+
+        class _StreamingBatchSize:
+            def get(self):
+                return 1
+
+        class _Harness:
+            MIC_VISIBILITY_MAX_ATTEMPTS = 1
+            MIC_VISIBILITY_RETRY_DELAY = 0
+
+            def __init__(self, tmp, inputSet):
+                self._tmp = tmp
+                self._inputSet = inputSet
+                self.inputSet = _Pointer(inputSet)
+                self.inputFn = "logical-input"
+                self.insertedIds = [1]
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = True
+                self._resultsLock = threading.Lock()
+                self.streamingBatchSize = _StreamingBatchSize()
+                self.scheduledBatches = []
+                self.errors = []
+                self.lastCheck = None
+
+            def _getTmpPath(self, name):
+                return str(Path(self._tmp) / name)
+
+            def _loadInputSet(self, _inputFn):
+                return self._inputSet
+
+            def prepareBatch(self, newIds, counterBatch):
+                return MiffiProtMicrographs.prepareBatch(self, newIds, counterBatch)
+
+            def _prepareBatchWithIds(self, newIds, counterBatch):
+                return MiffiProtMicrographs._prepareBatchWithIds(
+                    self, newIds, counterBatch
+                )
+
+            def runMiffiInference(self, _batchDir, _counterBatch):
+                return "inference.pkl"
+
+            def runMiffiCategorize(self, _counterBatch, _inferenceOutputFile):
+                return "categorize.pkl", "categorize.log"
+
+            def deleteBatch(self, batchDir):
+                Path(batchDir).rmdir()
+
+            def error(self, message):
+                self.errors.append(message)
+
+            def info(self, _message):
+                pass
+
+            def debug(self, _message):
+                pass
+
+            def isContinued(self):
+                return False
+
+            def _getFirstJoinStep(self):
+                return None
+
+            def _insertNewImageSteps(self, newIds, _batchSize):
+                self.scheduledBatches.append(list(newIds))
+                return []
+
+            def updateSteps(self):
+                pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            inputSet = _InputSet(tmp)
+            protocol = _Harness(tmp, inputSet)
+
+            MiffiProtMicrographs.miffStep(protocol, [1], 1)
+
+            self.assertNotIn(
+                1,
+                protocol.processedIds,
+                "A micrograph omitted from the MIFFI batch because it is not yet visible must not be marked as processed.",
+            )
+
+            inputSet._ids = {1}
+            MiffiProtMicrographs._checkNewInput(protocol)
+
+            self.assertEqual(
+                [[1]],
+                protocol.scheduledBatches,
+                "A temporarily invisible micrograph must become schedulable again once it is visible.",
+            )
