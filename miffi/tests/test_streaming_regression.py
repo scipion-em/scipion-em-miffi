@@ -132,6 +132,174 @@ class TestMiffiStreamingRegression(unittest.TestCase):
         self.assertEqual(protocol.logicalInput.loadCalls, 1)
         self.assertEqual(protocol.logicalInput.loadPropertiesCalls, 1)
 
+    def testStreamingPollDiscoversOnlyIdsAboveWatermark(self):
+        class _IncrementalInputSet:
+            def __init__(self):
+                self.whereCalls = []
+                self.closed = False
+
+            def hasChangedSince(self, _lastCheck):
+                return True
+
+            def getIdSet(self):
+                raise AssertionError(
+                    "Normal MIFFI streaming polls must not full-scan all input ids."
+                )
+
+            def getUniqueValues(self, attributes, where=None):
+                assert attributes == "id"
+                self.whereCalls.append(where)
+                if where == "id > 2":
+                    return [3, 4]
+                raise AssertionError(
+                    "Expected an incremental id query above the watermark, got %r"
+                    % where
+                )
+
+            def isStreamClosed(self):
+                return False
+
+            def close(self):
+                self.closed = True
+
+        class _BatchSize:
+            def get(self):
+                return 1
+
+        class _Harness:
+            def __init__(self):
+                self._inputSet = _IncrementalInputSet()
+                self.inputSet = _Pointer(self._inputSet)
+                self.inputFn = "logical-input"
+                self.insertedIds = [1, 2]
+                self._inputWatermark = 2
+                self._pendingInputIds = set()
+                self.isStreamClosed = False
+                self.streamingBatchSize = _BatchSize()
+                self.newDeps = []
+                self.scheduled = []
+                self.lastCheck = None
+
+            def debug(self, _message):
+                pass
+
+            def info(self, _message):
+                pass
+
+            def _loadInputSet(self, _inputFn):
+                return self._inputSet
+
+            def isContinued(self):
+                return False
+
+            def _insertNewImageSteps(self, newIds, batchSize):
+                ids = list(newIds)
+                self.scheduled.append((ids, batchSize))
+                self.insertedIds.extend(ids)
+                return [101]
+
+            def updateSteps(self):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewInput(protocol)
+
+        self.assertEqual(
+            ["id > 2"],
+            protocol._inputSet.whereCalls,
+            "MIFFI must query only ids above the current streaming watermark.",
+        )
+        self.assertEqual(
+            [([3, 4], 1)],
+            protocol.scheduled,
+        )
+        self.assertEqual(
+            4,
+            protocol._inputWatermark,
+        )
+
+    def testClosedStreamReconcilesIdBelowWatermark(self):
+        class _ClosedInputSet:
+            def __init__(self):
+                self.whereCalls = []
+                self.closed = False
+
+            def getUniqueValues(self, attributes, where=None):
+                assert attributes == "id"
+                self.whereCalls.append(where)
+                if where == "id > 10":
+                    return []
+                if where is None:
+                    return [9, 10]
+                raise AssertionError("Unexpected where clause: %r" % where)
+
+            def getSize(self):
+                return 2
+
+            def isStreamClosed(self):
+                return True
+
+            def close(self):
+                self.closed = True
+
+        class _BatchSize:
+            def get(self):
+                return 1
+
+        class _Harness:
+            def __init__(self):
+                self._inputSet = _ClosedInputSet()
+                self.inputSet = _Pointer(self._inputSet)
+                self.inputFn = "logical-input"
+                self.insertedIds = [10]
+                self._inputWatermark = 10
+                self._pendingInputIds = set()
+                self.isStreamClosed = False
+                self.streamingBatchSize = _BatchSize()
+                self.newDeps = []
+                self.scheduled = []
+                self.lastCheck = None
+
+            def debug(self, _message):
+                pass
+
+            def info(self, _message):
+                pass
+
+            def _loadInputSet(self, _inputFn):
+                return self._inputSet
+
+            def isContinued(self):
+                return False
+
+            def _insertNewImageSteps(self, newIds, batchSize):
+                ids = list(newIds)
+                self.scheduled.append((ids, batchSize))
+                self.insertedIds.extend(ids)
+                return [202]
+
+            def updateSteps(self):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewInput(protocol)
+
+        self.assertEqual(
+            ["id > 10", None],
+            protocol._inputSet.whereCalls,
+            "A closed stream with fewer known ids than its logical size must "
+            "perform one terminal full-id reconciliation.",
+        )
+        self.assertEqual(
+            [([9], 1)],
+            protocol.scheduled,
+            "Terminal reconciliation must recover an id that became visible "
+            "below the already advanced watermark.",
+        )
+        self.assertEqual(10, protocol._inputWatermark)
+
     def testReleasedLateVisibleIdBypassesNoChangeShortcut(self):
         protocol = _StreamingHarness()
 
@@ -1385,6 +1553,9 @@ class TestMiffiContinueRegression(unittest.TestCase):
             def getIdSet(self):
                 return {1, 2, 3}
 
+            def getSize(self):
+                return 3
+
             def isStreamClosed(self):
                 return True
 
@@ -1454,6 +1625,46 @@ class TestMiffiContinueRegression(unittest.TestCase):
 
 
 class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
+    def testInvisibleScheduledMicReturnsToPendingAfterWatermarkAdvance(self):
+        import threading
+
+        class _Harness:
+            def __init__(self):
+                self.insertedIds = [7]
+                self._pendingInputIds = set()
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self._resultsLock = threading.Lock()
+                self.isStreamClosed = True
+                self.deletedBatches = []
+
+            def _prepareBatchWithIds(self, newIds, counterBatch):
+                self.assertedNewIds = list(newIds)
+                return "/tmp/miffi-invisible-watermarked", []
+
+            def deleteBatch(self, batchDir):
+                self.deletedBatches.append(batchDir)
+
+            def info(self, _message):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs.miffStep(protocol, [7], 1)
+
+        self.assertNotIn(
+            7,
+            protocol.insertedIds,
+            "An invisible scheduled micrograph must be released from insertedIds.",
+        )
+        self.assertIn(
+            7,
+            protocol._pendingInputIds,
+            "An invisible micrograph discovered below the advanced watermark "
+            "must return to pending input state so a later poll can retry it.",
+        )
+
     def testInvisibleMicIsNotMarkedProcessedAndCanBeScheduledAgain(self):
         import tempfile
         import threading
@@ -1476,6 +1687,9 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
 
             def getIdSet(self):
                 return set(self._ids)
+
+            def getSize(self):
+                return len(self._ids)
 
             def isStreamClosed(self):
                 return True

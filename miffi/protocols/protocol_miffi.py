@@ -193,6 +193,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                           OUTPUT_DISCARDED: True}
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
+        self._inputWatermark = 0
+        self._pendingInputIds = set()
         self.processedIds = [] # Ids to be register to output
         self.outputCategorizeFiles = []
         self.outputCategorizeLogFiles = []
@@ -253,42 +255,122 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         return accepted_labels, rejected_labels
 
     def _checkNewInput(self):
-        # Check if there are new images to process from the input set.
-        # Let the Set decide how logical changes are detected.
+        # Discover only input ids above the logical streaming watermark.
+        # Items discovered but not scheduled yet remain pending across polls.
         self.lastCheck = getattr(self, 'lastCheck', datetime.now())
-        inputSetRef = self.inputSet.get()
         self.debug('Last check: %s' % prettyTime(self.lastCheck))
 
-        if self.insertedIds and not inputSetRef.hasChangedSince(self.lastCheck):
-            knownInputIds = inputSetRef.getIdSet()
-            if not set(knownInputIds).difference(self.insertedIds):
-                return None
-
         inputSet = self._loadInputSet(self.inputFn)
-        inputSetIds = inputSet.getIdSet()
-        newIds = [idImage for idImage in inputSetIds if idImage not in self.insertedIds]
+        watermark = getattr(self, '_inputWatermark', 0)
+        pendingIds = getattr(self, '_pendingInputIds', None)
+        if pendingIds is None:
+            pendingIds = set()
+            self._pendingInputIds = pendingIds
+
+        try:
+            discoveredIds = list(
+                inputSet.getUniqueValues(
+                    'id',
+                    where='id > %d' % watermark,
+                )
+            )
+        except (AttributeError, NotImplementedError):
+            # Compatibility fallback for Set-like implementations that do
+            # not support filtered unique values. Native Scipion Set mappers
+            # use the incremental query above.
+            getUniqueValues = getattr(inputSet, 'getUniqueValues', None)
+            if callable(getUniqueValues):
+                discoveredIds = [
+                    itemId
+                    for itemId in getUniqueValues('id')
+                    if itemId > watermark
+                ]
+            else:
+                discoveredIds = [
+                    itemId
+                    for itemId in inputSet.getIdSet()
+                    if itemId > watermark
+                ]
+
+        discoveredIds = sorted(discoveredIds)
+        if discoveredIds:
+            self._inputWatermark = max(watermark, max(discoveredIds))
+            pendingIds.update(discoveredIds)
+
+        self.isStreamClosed = inputSet.isStreamClosed()
+
+        # A producer can close after an id below the watermark becomes
+        # visible (for example id 10 was seen before id 9). Normal polls
+        # stay incremental; only a closed stream whose known logical ids
+        # do not yet match its reported size performs a full reconciliation.
+        if self.isStreamClosed:
+            expectedSize = inputSet.getSize()
+            knownIds = set(self.insertedIds).union(pendingIds)
+
+            if len(knownIds) < expectedSize:
+                try:
+                    reconciledIds = list(
+                        inputSet.getUniqueValues('id')
+                    )
+                except (AttributeError, NotImplementedError):
+                    reconciledIds = list(inputSet.getIdSet())
+
+                if reconciledIds:
+                    self._inputWatermark = max(
+                        self._inputWatermark,
+                        max(reconciledIds),
+                    )
+
+                pendingIds.update(
+                    imageId
+                    for imageId in reconciledIds
+                    if imageId not in self.insertedIds
+                )
 
         self.lastCheck = datetime.now()
-        self.isStreamClosed = inputSet.isStreamClosed()
         inputSet.close()
 
-        if self.isContinued() and not self.insertedIds:  # For "Continue" action and the first round
+        if self.isContinued() and not self.insertedIds:
             doneIds, _, _, _ = self._getAllDoneIds()
-            skipIds = list(set(newIds).intersection(set(doneIds)))
-            newIds = list(set(newIds).difference(set(doneIds)))
-            self.info("Skipping Images with ID: %s, seems to be done" % skipIds)
-            self.insertedIds = doneIds  # During the first round of "Continue" action it has to be filled
+            doneIds = set(doneIds)
+            skipIds = sorted(pendingIds.intersection(doneIds))
+            if skipIds:
+                self.info(
+                    "Skipping Images with ID: %s, seems to be done"
+                    % skipIds
+                )
+            pendingIds.difference_update(doneIds)
+            self.insertedIds = list(doneIds)
 
-        # Now handle the steps depending on the streaming batch size
+        newIds = sorted(
+            imageId
+            for imageId in pendingIds
+            if imageId not in self.insertedIds
+        )
+
+        # Now handle the steps depending on the streaming batch size.
         streamingBatchSize = self.streamingBatchSize.get()
         if len(newIds) < streamingBatchSize and not self.isStreamClosed:
-            return  # No register any step if the batch size is not reach unless is the lass iter
+            return
 
         if newIds:
-            streamingBatchSize = len(newIds) if streamingBatchSize == 0 else streamingBatchSize
-            fDeps = self._insertNewImageSteps(newIds, streamingBatchSize)
+            streamingBatchSize = (
+                len(newIds)
+                if streamingBatchSize == 0
+                else streamingBatchSize
+            )
+
+            insertedBefore = set(self.insertedIds)
+            fDeps = self._insertNewImageSteps(
+                newIds,
+                streamingBatchSize,
+            )
+            scheduledIds = set(self.insertedIds).difference(insertedBefore)
+            pendingIds.difference_update(scheduledIds)
+
             self.newDeps.extend(fDeps)
-            self.updateSteps()
+            if fDeps:
+                self.updateSteps()
 
     def _checkNewOutput(self):
         doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
@@ -537,6 +619,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     imageId for imageId in self.insertedIds
                     if imageId not in missingIds
                 ]
+
+                pendingInputIds = getattr(
+                    self,
+                    '_pendingInputIds',
+                    None,
+                )
+                if pendingInputIds is not None:
+                    pendingInputIds.update(missingIds)
 
         try:
             if not preparedIds:
