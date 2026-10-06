@@ -168,8 +168,16 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.initializeParams()
 
         while not self.finished:
+            if self.isFailed():
+                return
+
             self._checkNewInput()
+            if self.isFailed():
+                return
+
             self._checkNewOutput()
+            if self.isFailed():
+                return
 
             if self.finished:
                 break

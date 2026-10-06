@@ -1511,6 +1511,23 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
 
 
 class TestMiffiStreamingGeneratorRegression(unittest.TestCase):
+    def testGeneratorStopsImmediatelyWhenProtocolFails(self):
+        from unittest.mock import Mock
+
+        protocol = Mock()
+        protocol.finished = False
+        protocol.isFailed.return_value = True
+        protocol._checkNewInput.side_effect = AssertionError(
+            "A failed streaming generator must stop before polling input."
+        )
+
+        MiffiProtMicrographs.stepsGeneratorStep(protocol)
+
+        protocol.initializeParams.assert_called_once()
+        protocol._checkNewInput.assert_not_called()
+        protocol._checkNewOutput.assert_not_called()
+        protocol._insertFunctionStep.assert_not_called()
+
     def testGeneratorStopsImmediatelyWhenAlreadyFinished(self):
         # The old _stepsCheck polling callback (driven externally by the
         # executor, with a wait=True join step unlocked via STATUS_NEW) is
@@ -1533,6 +1550,7 @@ class TestMiffiStreamingGeneratorRegression(unittest.TestCase):
 
         protocol = Mock()
         protocol.finished = False
+        protocol.isFailed.return_value = False
         protocol._getStreamingSleepOnWait.return_value = 0
 
         polls = []
