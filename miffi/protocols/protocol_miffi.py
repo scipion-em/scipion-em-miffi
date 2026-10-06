@@ -321,8 +321,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
         inputSet = self._loadInputSet(self.inputFn)
-        maxSize = inputSet.getSize()
-        self.finished = self.isStreamClosed and len(set(doneListIds)) == maxSize
+        inputIds = set(inputSet.getIdSet())
+        self.finished = self.isStreamClosed and set(doneListIds) == inputIds
 
         if not newDone:
             self._store()
@@ -450,7 +450,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         self.finished = (
             self.isStreamClosed
-            and len(set(persistedDoneIds)) == maxSize
+            and set(persistedDoneIds) == inputIds
         )
 
         if pendingIds:

@@ -242,6 +242,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def getSize(self):
                     return 2
 
+                def getIdSet(self):
+                    return {1, 2}
+
                 def __contains__(self, objId):
                     return True
 
@@ -396,6 +399,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def getSize(self):
                     return 1
 
+                def getIdSet(self):
+                    return {1}
+
             class _Harness:
                 def __init__(self):
                     self._resultsLock = threading.Lock()
@@ -456,6 +462,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
             class _Input:
                 def getSize(self):
                     return 1
+
+                def getIdSet(self):
+                    return {1}
 
                 def __contains__(self, objId):
                     return objId == 1
@@ -562,6 +571,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
 
                 def getSize(self):
                     return len(self._visibleIds)
+
+                def getIdSet(self):
+                    return set(self._visibleIds)
 
                 def __contains__(self, objId):
                     return objId in self._visibleIds
@@ -872,6 +884,9 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
             def getSize(self):
                 return 2
 
+            def getIdSet(self):
+                return {1, 2}
+
             def __contains__(self, objId):
                 return objId == 1
 
@@ -921,6 +936,49 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
         # generator's while-loop reads it directly, so it staying False is
         # exactly what keeps the protocol alive for another poll.
         self.assertFalse(protocol.finished, "A processed id must not make the protocol terminal until it is durably present in an output Set.")
+
+
+class TestMiffiTerminalCompletionRegression(unittest.TestCase):
+    def testClosedStreamRequiresExactInputIdsToBePersisted(self):
+        import threading
+
+        class _Input:
+            def getSize(self):
+                return 2
+
+            def getIdSet(self):
+                return {1, 2}
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = True
+                self.inputFn = "logical-input"
+                self.finished = False
+
+            def _getAllDoneIds(self):
+                # Same cardinality as the input, but not the same logical IDs.
+                return [1, 99], 2, [1, 99], []
+
+            def _loadInputSet(self, _inputFn):
+                return _Input()
+
+            def _store(self):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertFalse(
+            protocol.finished,
+            "A closed MIFFI stream must not become terminal merely because "
+            "the number of persisted output IDs matches the input size; "
+            "the persisted IDs must exactly match the logical input IDs.",
+        )
 
 
 class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
@@ -974,6 +1032,9 @@ class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
             class _Input:
                 def getSize(self):
                     return 1
+
+                def getIdSet(self):
+                    return {1}
 
                 def __contains__(
                         self,
@@ -1203,6 +1264,9 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
             class _Input:
                 def getSize(self):
                     return 1
+
+                def getIdSet(self):
+                    return {1}
 
                 def __contains__(self, objId):
                     return objId == 1
