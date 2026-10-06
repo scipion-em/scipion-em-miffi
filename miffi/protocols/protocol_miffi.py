@@ -361,7 +361,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                     OUTPUT_DISCARDED, suffix="_discarded"
                 )
 
-            # Assign micrographs to their sets with attributes
+            # Assign micrographs to their sets with attributes.
+            # Keep track of processed ids for which this result snapshot
+            # contains no recognized MIFFI category. Those ids must be
+            # released for a fresh processing attempt instead of replaying
+            # the same result files forever.
+            unclassifiedIds = set()
+
             for imageId in newDone:
                 # Set.getItem raises rather than returning None for a row
                 # it cannot find - check membership first before indexing.
@@ -382,6 +388,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                 elif micName in rejected:
                     setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
                     outputSetDiscarded.append(image)
+
+                else:
+                    unclassifiedIds.add(imageId)
 
             if accepted:
                 self._updateOutputSet(OUTPUT, outputSet, streamMode)
@@ -405,9 +414,43 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             requeuePendingResults()
             raise
 
+        if unclassifiedIds:
+            with resultsLock:
+                self.processedIds = [
+                    imageId
+                    for imageId in self.processedIds
+                    if imageId not in unclassifiedIds
+                ]
+
+                insertedIds = getattr(
+                    self,
+                    "insertedIds",
+                    None,
+                )
+
+                if insertedIds is not None:
+                    self.insertedIds = [
+                        imageId
+                        for imageId in insertedIds
+                        if imageId not in unclassifiedIds
+                    ]
+
         persistedDoneIds, _, _, _ = self._getAllDoneIds()
-        pendingIds = set(newDone).difference(persistedDoneIds)
-        self.finished = self.isStreamClosed and len(set(persistedDoneIds)) == maxSize
+
+        # Results that were classified but could not be durably registered
+        # must be replayed. Unclassified results are intentionally consumed:
+        # their ids were released above so MIFFI can process them again from
+        # scratch instead of replaying the same unusable result files.
+        pendingIds = (
+            set(newDone)
+            .difference(persistedDoneIds)
+            .difference(unclassifiedIds)
+        )
+
+        self.finished = (
+            self.isStreamClosed
+            and len(set(persistedDoneIds)) == maxSize
+        )
 
         if pendingIds:
             requeuePendingResults()

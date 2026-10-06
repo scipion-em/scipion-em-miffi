@@ -940,6 +940,157 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
         self.assertIsNone(protocol.joinStep.status, "The final join step must remain waiting while any processed id is still unpersisted.")
 
 
+class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
+    def testProcessedMicWithoutRecognizedCategoryIsReleasedForRetry(self):
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(
+                tmp,
+                "batch.pkl",
+            )
+            logFile = os.path.join(
+                tmp,
+                "batch.log",
+            )
+
+            with open(
+                    pklFile,
+                    "wb",
+            ) as handle:
+                pickle.dump(
+                    {
+                        miffi_module.GOOD: [],
+                    },
+                    handle,
+                )
+
+            with open(
+                    logFile,
+                    "w",
+            ) as handle:
+                handle.write("")
+
+            class _Summary:
+                def set(self, _value):
+                    pass
+
+            class _Image:
+                def clone(self):
+                    return self
+
+                def getFileName(self):
+                    return os.path.join(
+                        tmp,
+                        "mic_1.mrc",
+                    )
+
+            class _Input:
+                def getSize(self):
+                    return 1
+
+                def __contains__(
+                        self,
+                        objId,
+                ):
+                    return objId == 1
+
+                def getItem(
+                        self,
+                        field,
+                        objId,
+                ):
+                    assert field == "id"
+                    assert objId == 1
+                    return _Image()
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = (
+                        threading.Lock()
+                    )
+                    self.processedIds = [1]
+                    self.insertedIds = [1]
+                    self.outputCategorizeFiles = [
+                        pklFile
+                    ]
+                    self.outputCategorizeLogFiles = [
+                        logFile
+                    ]
+                    self.isStreamClosed = True
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [
+                        miffi_module.GOOD
+                    ]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = (
+                        defaultdict(list)
+                    )
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = object()
+                    self.finished = False
+
+                def _getAllDoneIds(self):
+                    return [], 0, [], []
+
+                def _loadInputSet(
+                        self,
+                        _inputFn,
+                ):
+                    return _Input()
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _getFirstJoinStep(self):
+                    return None
+
+                def _store(self):
+                    pass
+
+            protocol = _Harness()
+
+            MiffiProtMicrographs._checkNewOutput(
+                protocol
+            )
+
+            self.assertNotIn(
+                1,
+                protocol.processedIds,
+                "An unclassified processed id must be released for retry.",
+            )
+
+            self.assertNotIn(
+                1,
+                protocol.insertedIds,
+                "An unclassified id must become schedulable again.",
+            )
+
+            self.assertEqual(
+                [],
+                protocol.outputCategorizeFiles,
+                "Consumed unclassified result files must not be replayed forever.",
+            )
+
+            self.assertEqual(
+                [],
+                protocol.outputCategorizeLogFiles,
+                "Consumed unclassified result logs must not be replayed forever.",
+            )
+
+
 class TestMiffiOutputIdentityRegression(unittest.TestCase):
     def testBackingFileDoesNotBecomeDurableOutputIdentity(self):
         class _FreshOutput:
@@ -1180,6 +1331,87 @@ class TestMiffiScipionOutputFactoryRegression(unittest.TestCase):
         self.assertEqual(_FreshOutput.STREAM_OPEN, discarded.streamState)
         self.assertIs(inputs, accepted.copiedFrom)
         self.assertIs(inputs, discarded.copiedFrom)
+
+
+class TestMiffiContinueRegression(unittest.TestCase):
+    def testContinueSkipsPersistedIdsAndSchedulesOnlyPendingOnes(self):
+        class _InputSet:
+            def __init__(self):
+                self.closed = False
+
+            def getIdSet(self):
+                return {1, 2, 3}
+
+            def isStreamClosed(self):
+                return True
+
+            def close(self):
+                self.closed = True
+
+            def hasChangedSince(self, _lastCheck):
+                return True
+
+        class _BatchSize:
+            def get(self):
+                return 1
+
+        class _Harness:
+            def __init__(self):
+                self._inputSet = _InputSet()
+                self.inputSet = _Pointer(self._inputSet)
+                self.inputFn = "logical-input"
+                self.insertedIds = []
+                self.isStreamClosed = False
+                self.streamingBatchSize = _BatchSize()
+                self.scheduled = []
+
+            def debug(self, _message):
+                pass
+
+            def info(self, _message):
+                pass
+
+            def _loadInputSet(self, _inputFn):
+                return self._inputSet
+
+            def _getFirstJoinStep(self):
+                return None
+
+            def isContinued(self):
+                return True
+
+            def _getAllDoneIds(self):
+                return [1, 2], 2, [1, 2], []
+
+            def _insertNewImageSteps(self, newIds, batchSize):
+                self.scheduled.append((list(newIds), batchSize))
+                self.insertedIds.extend(newIds)
+                return [99]
+
+            def updateSteps(self):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewInput(
+            protocol
+        )
+
+        self.assertEqual(
+            [([3], 1)],
+            protocol.scheduled,
+        )
+
+        self.assertEqual(
+            {1, 2, 3},
+            set(protocol.insertedIds),
+        )
+
+        self.assertTrue(
+            protocol._inputSet.closed,
+        )
+
+
 class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
     def testInvisibleMicIsNotMarkedProcessedAndCanBeScheduledAgain(self):
         import tempfile
