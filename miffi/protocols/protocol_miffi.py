@@ -39,12 +39,12 @@ import re
 from collections import defaultdict, Counter
 import matplotlib.pyplot as plt
 
-from pyworkflow.protocol import STEPS_PARALLEL
+from pyworkflow.protocol import STEPS_PARALLEL, ProtStreamingBase
 import pyworkflow.protocol.params as params
 from pyworkflow.utils import prettyTime, Message
 from pyworkflow.utils.path import makePath, copyFile, copyTree, cleanPath
 from pwem.objects import SetOfMicrographs, Set, String
-from pwem.protocols import EMProtocol, ProtPreprocessMicrographs
+from pwem.protocols import ProtPreprocessMicrographs
 from pyworkflow.protocol.constants import LEVEL_ADVANCED
 from pyworkflow import BETA, UPDATED, NEW, PROD
 
@@ -67,7 +67,7 @@ CATEGORIES = [GOOD, BAD_SINGLE, BAD_FILM, BAD_DRIFT, BAD_MINOR_CRYSTALLINE, BAD_
 HISTROGRAM_PLOT = 'miffi_label_histogram.png'
 TIME_PLOT = 'miffi_label_time_evolution.png'
 
-class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
+class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
     """
     Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
     """
@@ -153,15 +153,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         form.getParam('streamingSleepOnWait').setDefault(5)
 
     # --------------------------- STEPS functions ------------------------------
-    def _insertAllSteps(self):
-        """Insert only the resumable streaming generator."""
-        self._insertFunctionStep(self.resumableStepGeneratorStep,
-                                 str(datetime.now()), needsGPU=False)
-
-    def resumableStepGeneratorStep(self, timestamp):
-        """Run the generator as a unique step on every resume."""
-        self.stepsGeneratorStep()
-
     def stepsGeneratorStep(self):
         """Discover, categorize and publish micrographs incrementally."""
         self.newDeps = []
@@ -192,11 +183,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         self._insertFunctionStep(self.createOutputStep,
                                  prerequisites=self.newDeps, needsGPU=False)
-
-    def _stepsCheck(self):
-        """Persist steps created by the generator, without legacy polling."""
-        if getattr(self, '_newSteps', False):
-            self.updateSteps()
 
     def createOutputStep(self):
         self._closeOutputSet()

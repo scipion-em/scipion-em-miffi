@@ -9,6 +9,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import patch
 
+from pyworkflow.protocol import ProtStreamingBase
 from miffi.protocols.protocol_miffi import MiffiProtMicrographs
 from miffi.protocols import protocol_miffi as miffi_module
 
@@ -1508,6 +1509,30 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
                 protocol.scheduledBatches,
                 "A temporarily invisible micrograph must become schedulable again once it is visible.",
             )
+
+
+class TestMiffiStreamingArchitectureRegression(unittest.TestCase):
+    def testProtocolUsesProtStreamingBaseInfrastructure(self):
+        self.assertTrue(
+            issubclass(MiffiProtMicrographs, ProtStreamingBase),
+            "MIFFI streaming must inherit from ProtStreamingBase.",
+        )
+        self.assertIs(
+            MiffiProtMicrographs._insertAllSteps,
+            ProtStreamingBase._insertAllSteps,
+            "MIFFI must use ProtStreamingBase._insertAllSteps instead of "
+            "maintaining a plugin-local copy.",
+        )
+        self.assertIs(
+            MiffiProtMicrographs.resumableStepGeneratorStep,
+            ProtStreamingBase.resumableStepGeneratorStep,
+            "MIFFI must use ProtStreamingBase.resumableStepGeneratorStep.",
+        )
+        self.assertIs(
+            MiffiProtMicrographs._stepsCheck,
+            ProtStreamingBase._stepsCheck,
+            "MIFFI must use ProtStreamingBase._stepsCheck.",
+        )
 
 
 class TestMiffiStreamingGeneratorRegression(unittest.TestCase):
