@@ -381,6 +381,59 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
             )
             self.assertIn(2, protocol.processedIds)
 
+    def testOutputPreparationFailureKeepsResultFilesPending(self):
+        import pickle
+        import tempfile
+        import threading
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_1_dict.pkl")
+            logFile = os.path.join(tmp, "batch_1.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump({miffi_module.GOOD: ["mic_1.mrc"]}, handle)
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Input:
+                def getSize(self):
+                    return 1
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = True
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+
+                def _getAllDoneIds(self):
+                    return [], 0, [], []
+
+                def _loadInputSet(self, _inputFn):
+                    return _Input()
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    raise RuntimeError("simulated output preparation failure")
+
+            protocol = _Harness()
+
+            with self.assertRaises(RuntimeError):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                [pklFile],
+                protocol.outputCategorizeFiles,
+                "MIFFI classification results must remain pending when output preparation fails.",
+            )
+            self.assertEqual(
+                [logFile],
+                protocol.outputCategorizeLogFiles,
+            )
+
     def testOutputUpdateFailureKeepsResultFilesPending(self):
         import pickle
         import tempfile

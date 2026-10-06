@@ -329,58 +329,60 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         streamMode = Set.STREAM_OPEN
 
-        categorized_micrographs = defaultdict(list)
-        accepted = {}
-        rejected = {}
-
-        for pkl_files in outputCategorizeFiles:
-            with open(pkl_files, 'rb') as file:
-                data = pickle.load(file)
-                for category in CATEGORIES:
-                    if category in data:
-                        for path in data[category]:
-                            mic_name = Path(path).name
-                            categorized_micrographs[mic_name].append(category)
-
-        for mic_name, labels in categorized_micrographs.items():
-            matching_accept = [l for l in labels if l in self.acceptedLabels]
-            matching_reject = [l for l in labels if l in self.rejectedLabels]
-
-            if matching_accept:
-                # Pick first accepted label, keep original meaning
-                accepted[mic_name] = {'label': matching_accept[0]}
-            elif matching_reject:
-                rejected[mic_name] = {'label': matching_reject[0]}
-
-        # Load output sets
-        if accepted:
-            outputSet = self._loadOutputSet(OUTPUT)
-        if rejected:
-            outputSetDiscarded = self._loadOutputSet(OUTPUT_DISCARDED, suffix="_discarded")
-
-        # Assign micrographs to their sets with attributes
-        for imageId in newDone:
-            # Set.getItem raises rather than returning None for a row
-            # it cannot find - check membership first before indexing.
-            if imageId not in inputSet:
-                self.error(
-                    "Micrograph with id %d is not visible in the input "
-                    "Set; excluding it from the output." % imageId
-                )
-                continue
-
-            image = inputSet.getItem("id", imageId).clone()
-            micName = os.path.basename(image.getFileName())
-
-            if micName in accepted:
-                setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
-                outputSet.append(image)
-
-            elif micName in rejected:
-                setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
-                outputSetDiscarded.append(image)
-
         try:
+            categorized_micrographs = defaultdict(list)
+            accepted = {}
+            rejected = {}
+
+            for pkl_files in outputCategorizeFiles:
+                with open(pkl_files, 'rb') as file:
+                    data = pickle.load(file)
+                    for category in CATEGORIES:
+                        if category in data:
+                            for path in data[category]:
+                                mic_name = Path(path).name
+                                categorized_micrographs[mic_name].append(category)
+
+            for mic_name, labels in categorized_micrographs.items():
+                matching_accept = [l for l in labels if l in self.acceptedLabels]
+                matching_reject = [l for l in labels if l in self.rejectedLabels]
+
+                if matching_accept:
+                    # Pick first accepted label, keep original meaning
+                    accepted[mic_name] = {'label': matching_accept[0]}
+                elif matching_reject:
+                    rejected[mic_name] = {'label': matching_reject[0]}
+
+            # Load output sets
+            if accepted:
+                outputSet = self._loadOutputSet(OUTPUT)
+            if rejected:
+                outputSetDiscarded = self._loadOutputSet(
+                    OUTPUT_DISCARDED, suffix="_discarded"
+                )
+
+            # Assign micrographs to their sets with attributes
+            for imageId in newDone:
+                # Set.getItem raises rather than returning None for a row
+                # it cannot find - check membership first before indexing.
+                if imageId not in inputSet:
+                    self.error(
+                        "Micrograph with id %d is not visible in the input "
+                        "Set; excluding it from the output." % imageId
+                    )
+                    continue
+
+                image = inputSet.getItem("id", imageId).clone()
+                micName = os.path.basename(image.getFileName())
+
+                if micName in accepted:
+                    setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
+                    outputSet.append(image)
+
+                elif micName in rejected:
+                    setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
+                    outputSetDiscarded.append(image)
+
             if accepted:
                 self._updateOutputSet(OUTPUT, outputSet, streamMode)
                 outputSet = getattr(self, OUTPUT, outputSet)
@@ -388,10 +390,16 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                     self._defineSourceRelation(self.inputSet, outputSet)
                     self.firstTime[OUTPUT] = False
             if rejected:
-                self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
-                outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
+                self._updateOutputSet(
+                    OUTPUT_DISCARDED, outputSetDiscarded, streamMode
+                )
+                outputSetDiscarded = getattr(
+                    self, OUTPUT_DISCARDED, outputSetDiscarded
+                )
                 if self.firstTime[OUTPUT_DISCARDED]:
-                    self._defineSourceRelation(self.inputSet, outputSetDiscarded)
+                    self._defineSourceRelation(
+                        self.inputSet, outputSetDiscarded
+                    )
                     self.firstTime[OUTPUT_DISCARDED] = False
         except Exception:
             requeuePendingResults()
