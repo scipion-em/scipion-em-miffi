@@ -518,6 +518,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         if imageId not in unclassifiedIds
                     ]
 
+        # Re-read durable outputs after publishing without changing the
+        # historical _getAllDoneIds() call contract used by test/protocol
+        # overrides.
+        self._persistedDoneIdsCache = None
         persistedDoneIds, _, _, _ = self._getAllDoneIds()
 
         # Results that were classified but could not be durably registered
@@ -735,24 +739,37 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
     # ------------------------- UTILS functions --------------------------------
     def _getAllDoneIds(self):
-        doneIds = []
+        cache = getattr(self, '_persistedDoneIdsCache', None)
+        if cache is not None:
+            doneIds, acceptedIds, discardedIds = cache
+            return (
+                list(doneIds),
+                len(doneIds),
+                list(acceptedIds),
+                list(discardedIds),
+            )
+
         acceptedIds = []
         discardedIds = []
-        sizeOutput = 0
 
         if hasattr(self, OUTPUT):
             self.outputMicrographs.loadAllProperties()
-            sizeOutput += self.outputMicrographs.getSize()
             acceptedIds.extend(list(self.outputMicrographs.getIdSet()))
-            doneIds.extend(acceptedIds)
 
         if hasattr(self, OUTPUT_DISCARDED):
             self.outputMicrographsDiscarded.loadAllProperties()
-            sizeOutput += self.outputMicrographsDiscarded.getSize()
-            discardedIds.extend(list(self.outputMicrographsDiscarded.getIdSet()))
-            doneIds.extend(discardedIds)
+            discardedIds.extend(
+                list(self.outputMicrographsDiscarded.getIdSet())
+            )
 
-        return doneIds, sizeOutput, acceptedIds, discardedIds
+        doneIds = list(acceptedIds) + list(discardedIds)
+        self._persistedDoneIdsCache = (
+            set(doneIds),
+            set(acceptedIds),
+            set(discardedIds),
+        )
+
+        return doneIds, len(doneIds), acceptedIds, discardedIds
 
     def _getInferenceParams(self, batchDir, outDir):
         """ Return the list of args for the command. """

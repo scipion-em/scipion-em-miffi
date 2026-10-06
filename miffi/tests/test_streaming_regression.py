@@ -1021,6 +1021,61 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
         self.assertTrue(protocol.outputMicrographs.loaded)
         self.assertTrue(protocol.outputMicrographsDiscarded.loaded)
 
+    def testIdleOutputPollsRestorePersistedIdsOnlyOnce(self):
+        import threading
+
+        class _Output:
+            def __init__(self):
+                self.getIdSetCalls = 0
+
+            def loadAllProperties(self):
+                pass
+
+            def getSize(self):
+                return 1
+
+            def getIdSet(self):
+                self.getIdSetCalls += 1
+                return {1}
+
+        class _Input:
+            def getIdSet(self):
+                return {1, 2}
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.outputMicrographs = _Output()
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = False
+                self.inputFn = "logical-input"
+                self.finished = False
+                self.storeCalls = 0
+
+            def _getAllDoneIds(self):
+                return MiffiProtMicrographs._getAllDoneIds(self)
+
+            def _loadInputSet(self, _inputFn):
+                return _Input()
+
+            def _store(self):
+                self.storeCalls += 1
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewOutput(protocol)
+        MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertEqual(
+            1,
+            protocol.outputMicrographs.getIdSetCalls,
+            "Idle MIFFI output polls must restore all persisted output ids "
+            "only once instead of full-scanning the output Set every poll.",
+        )
+        self.assertEqual(2, protocol.storeCalls)
+
     def testLoadOutputSetRefreshesExistingLogicalOutputBeforeAppend(self):
         existingOutput = _RefreshRequiredMiffiOutput([1])
         inputs = object()
