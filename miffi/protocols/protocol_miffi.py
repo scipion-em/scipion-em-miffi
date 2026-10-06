@@ -45,7 +45,7 @@ from pyworkflow.utils import prettyTime, Message
 from pyworkflow.utils.path import makePath, copyFile, copyTree, cleanPath
 from pwem.objects import SetOfMicrographs, Set, String
 from pwem.protocols import EMProtocol, ProtPreprocessMicrographs
-from pyworkflow.protocol.constants import STATUS_NEW, LEVEL_ADVANCED
+from pyworkflow.protocol.constants import LEVEL_ADVANCED
 from pyworkflow import BETA, UPDATED, NEW, PROD
 
 from .. import Plugin, MIFFI_MODELS
@@ -146,7 +146,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                            'This label is binary and describes whether the micrograph is rejected \n'
                            'based of more than one criteria.')
 
-        form.addParallelSection(threads=1)
+        form.addParallelSection(threads=3)
 
         self._defineStreamingParams(form)
         form.getParam('streamingBatchSize').setDefault(5)
@@ -154,9 +154,41 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     # --------------------------- STEPS functions ------------------------------
     def _insertAllSteps(self):
+        """Insert only the resumable streaming generator."""
+        self._insertFunctionStep(self.resumableStepGeneratorStep,
+                                 str(datetime.now()), needsGPU=False)
+
+    def resumableStepGeneratorStep(self, timestamp):
+        """Run the generator as a unique step on every resume."""
+        self.stepsGeneratorStep()
+
+    def stepsGeneratorStep(self):
+        """Discover, categorize and publish micrographs incrementally."""
+        self.newDeps = []
         self.initializeParams()
+
+        while not self.finished:
+            self._checkNewInput()
+            self._checkNewOutput()
+
+            if self.finished:
+                break
+
+            sleepOnWait = self._getStreamingSleepOnWait()
+            if sleepOnWait > 0:
+                self._streamingSleepOnWait()
+            else:
+                # A generator must yield CPU while waiting for new input
+                # or for in-flight batches to complete.
+                time.sleep(1)
+
         self._insertFunctionStep(self.createOutputStep,
-                                 prerequisites=[], wait=True, needsGPU=False)
+                                 prerequisites=self.newDeps, needsGPU=False)
+
+    def _stepsCheck(self):
+        """Persist steps created by the generator, without legacy polling."""
+        if getattr(self, '_newSteps', False):
+            self.updateSteps()
 
     def createOutputStep(self):
         self._closeOutputSet()
@@ -181,7 +213,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.inputFn = self.inputSet.get().getFileName()
         self._inputClass = self.inputSet.get().getClass()
         self._inputType = self.inputSet.get().getClassName().split('SetOf')[1]
-        self._baseName = '%s.sqlite' % self._inputType.lower()
 
     def _getDefinedLabels(self):
         categories = {
@@ -227,23 +258,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         return accepted_labels, rejected_labels
 
-    def _getFirstJoinStepName(self):
-        # This function will be used for streaming, to check which is
-        # the first function that need to wait for all ctfs
-        # to have completed, this can be overriden in subclasses
-        # (e.g., in Xmipp 'sortPSDStep')
-        return 'createOutputStep'
-
-    def _getFirstJoinStep(self):
-        for s in self._steps:
-            if s.funcName == self._getFirstJoinStepName():
-                return s
-        return None
-
-    def _stepsCheck(self):
-        self._checkNewInput()
-        self._checkNewOutput()
-
     def _checkNewInput(self):
         # Check if there are new images to process from the input set.
         # Let the Set decide how logical changes are detected.
@@ -264,8 +278,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.isStreamClosed = inputSet.isStreamClosed()
         inputSet.close()
 
-        outputStep = self._getFirstJoinStep()
-
         if self.isContinued() and not self.insertedIds:  # For "Continue" action and the first round
             doneIds, _, _, _ = self._getAllDoneIds()
             skipIds = list(set(newIds).intersection(set(doneIds)))
@@ -281,8 +293,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         if newIds:
             streamingBatchSize = len(newIds) if streamingBatchSize == 0 else streamingBatchSize
             fDeps = self._insertNewImageSteps(newIds, streamingBatchSize)
-            if outputStep is not None:
-                outputStep.addPrerequisites(*fDeps)
+            self.newDeps.extend(fDeps)
             self.updateSteps()
 
     def _checkNewOutput(self):
@@ -320,10 +331,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.finished = self.isStreamClosed and len(set(doneListIds)) == maxSize
 
         if not newDone:
-            if self.finished:
-                outputStep = self._getFirstJoinStep()
-                if outputStep and outputStep.isWaiting():
-                    outputStep.setStatus(STATUS_NEW)
             self._store()
             return
 
@@ -479,11 +486,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         dict_str = '\n'.join(f'{k}: {v}' for k, v in outputLogTmp.items())
         self.summaryVar.set(dict_str)
         self.outputLog  = outputLogTmp
-
-        if self.finished:  # Unlock createOutputStep if finished all jobs
-            outputStep = self._getFirstJoinStep()
-            if outputStep and outputStep.isWaiting():
-                outputStep.setStatus(STATUS_NEW)
 
         self._store()
 
@@ -691,6 +693,21 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                 ]
         params = ' '.join(args)
         return params
+
+    def _validate(self):
+        return self._validateParallelProcessing()
+
+    def _validateParallelProcessing(self):
+        # pyworkflow's executor always reserves one thread out of
+        # numberOfThreads for its own bookkeeping, and one more of the
+        # remaining slots is permanently held by the streaming generator
+        # step for the whole run - at least 3 threads are needed to leave
+        # a worker slot free for the miffi batches.
+        if self.numberOfThreads.get() < 3:
+            return ['Please assign at least 3 threads: one is reserved by '
+                    'the executor for its own bookkeeping and another is '
+                    'permanently held by the streaming generator.']
+        return []
 
     def _summary(self):
         summary = []

@@ -97,15 +97,13 @@ class _StreamingHarness:
         self.lastCheck = datetime.now()
         self.insertedBatches = []
         self.updateStepsCalls = 0
+        self.newDeps = []
 
     def debug(self, _message):
         pass
 
     def _loadInputSet(self, inputFn):
         return MiffiProtMicrographs._loadInputSet(self, inputFn)
-
-    def _getFirstJoinStep(self):
-        return None
 
     def isContinued(self):
         return False
@@ -282,8 +280,6 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def _plotMiffiTimeEvolution(self):
                     pass
 
-                def _getFirstJoinStep(self):
-                    return None
 
                 def _store(self):
                     pass
@@ -609,8 +605,6 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def _plotMiffiTimeEvolution(self):
                     pass
 
-                def _getFirstJoinStep(self):
-                    return None
 
                 def _store(self):
                     pass
@@ -880,16 +874,6 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
             def __contains__(self, objId):
                 return objId == 1
 
-        class _JoinStep:
-            def __init__(self):
-                self.status = None
-
-            def isWaiting(self):
-                return True
-
-            def setStatus(self, status):
-                self.status = status
-
         class _Harness:
             def __init__(self):
                 self._resultsLock = threading.Lock()
@@ -908,7 +892,6 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
                 self.inputSet = object()
                 self.finished = False
                 self.errors = []
-                self.joinStep = _JoinStep()
 
             def _getAllDoneIds(self):
                 return [1], 1, [1], []
@@ -922,9 +905,6 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
             def _plotMiffiTimeEvolution(self):
                 pass
 
-            def _getFirstJoinStep(self):
-                return self.joinStep
-
             def _store(self):
                 pass
 
@@ -936,8 +916,10 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
         with patch.object(miffi_module, "populate_and_update_categories", return_value={}):
             MiffiProtMicrographs._checkNewOutput(protocol)
 
+        # finished is now the only completion signal: the streaming
+        # generator's while-loop reads it directly, so it staying False is
+        # exactly what keeps the protocol alive for another poll.
         self.assertFalse(protocol.finished, "A processed id must not make the protocol terminal until it is durably present in an output Set.")
-        self.assertIsNone(protocol.joinStep.status, "The final join step must remain waiting while any processed id is still unpersisted.")
 
 
 class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
@@ -1054,8 +1036,6 @@ class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
                 def _plotMiffiTimeEvolution(self):
                     pass
 
-                def _getFirstJoinStep(self):
-                    return None
 
                 def _store(self):
                     pass
@@ -1278,8 +1258,6 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
                 def _plotMiffiTimeEvolution(self):
                     pass
 
-                def _getFirstJoinStep(self):
-                    return None
 
                 def _store(self):
                     pass
@@ -1364,6 +1342,7 @@ class TestMiffiContinueRegression(unittest.TestCase):
                 self.isStreamClosed = False
                 self.streamingBatchSize = _BatchSize()
                 self.scheduled = []
+                self.newDeps = []
 
             def debug(self, _message):
                 pass
@@ -1373,9 +1352,6 @@ class TestMiffiContinueRegression(unittest.TestCase):
 
             def _loadInputSet(self, _inputFn):
                 return self._inputSet
-
-            def _getFirstJoinStep(self):
-                return None
 
             def isContinued(self):
                 return True
@@ -1468,6 +1444,7 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
                 self.scheduledBatches = []
                 self.errors = []
                 self.lastCheck = None
+                self.newDeps = []
 
             def _getTmpPath(self, name):
                 return str(Path(self._tmp) / name)
@@ -1504,9 +1481,6 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
             def isContinued(self):
                 return False
 
-            def _getFirstJoinStep(self):
-                return None
-
             def _insertNewImageSteps(self, newIds, _batchSize):
                 self.scheduledBatches.append(list(newIds))
                 return []
@@ -1534,3 +1508,46 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
                 protocol.scheduledBatches,
                 "A temporarily invisible micrograph must become schedulable again once it is visible.",
             )
+
+
+class TestMiffiStreamingGeneratorRegression(unittest.TestCase):
+    def testGeneratorStopsImmediatelyWhenAlreadyFinished(self):
+        # The old _stepsCheck polling callback (driven externally by the
+        # executor, with a wait=True join step unlocked via STATUS_NEW) is
+        # now a single resumable generator step whose while-loop condition
+        # is self.finished itself.
+        from unittest.mock import Mock
+
+        protocol = Mock()
+        protocol.finished = True
+
+        MiffiProtMicrographs.stepsGeneratorStep(protocol)
+
+        protocol.initializeParams.assert_called_once()
+        protocol._checkNewInput.assert_not_called()
+        protocol._checkNewOutput.assert_not_called()
+        protocol._insertFunctionStep.assert_called_once()
+
+    def testGeneratorPollsUntilFinishedThenInsertsOutputStep(self):
+        from unittest.mock import Mock
+
+        protocol = Mock()
+        protocol.finished = False
+        protocol._getStreamingSleepOnWait.return_value = 0
+
+        polls = []
+
+        def _checkNewOutput():
+            polls.append(True)
+            # Terminate on the second poll, like a closed input stream.
+            if len(polls) == 2:
+                protocol.finished = True
+
+        protocol._checkNewOutput.side_effect = _checkNewOutput
+
+        with patch.object(miffi_module.time, "sleep"):
+            MiffiProtMicrographs.stepsGeneratorStep(protocol)
+
+        self.assertEqual(2, protocol._checkNewInput.call_count)
+        self.assertEqual(2, len(polls))
+        protocol._insertFunctionStep.assert_called_once()
