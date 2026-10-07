@@ -263,6 +263,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
     def _retryPendingSourceRelations(self):
         # Retry relations whose output persisted before relation creation.
+        # First reconcile against durable relation state: a previous call may
+        # have committed the relation and then failed before returning.
+        relationChecker = getattr(self, '_outputNeedsSourceRelation', None)
+
         for outputName in (OUTPUT, OUTPUT_DISCARDED):
             if not self.firstTime.get(outputName, False):
                 continue
@@ -270,6 +274,11 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             outputSet = getattr(self, outputName, None)
             if outputSet is None:
                 continue
+
+            if callable(relationChecker):
+                if not relationChecker(outputName):
+                    self.firstTime[outputName] = False
+                    continue
 
             self._defineSourceRelation(self.inputSet, outputSet)
             self.firstTime[outputName] = False

@@ -1456,6 +1456,163 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
             )
 
 
+    def testPersistedSourceRelationIsNotDuplicatedAfterAmbiguousFailure(self):
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_dict.pkl")
+            logFile = os.path.join(tmp, "batch.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump(
+                    {
+                        miffi_module.GOOD: ["1__mic_1.mrc"],
+                    },
+                    handle,
+                )
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Image:
+                def clone(self):
+                    return self
+
+                def getFileName(self):
+                    return os.path.join(tmp, "mic_1.mrc")
+
+            class _Input:
+                def __contains__(self, objId):
+                    return objId == 1
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    assert objId == 1
+                    return _Image()
+
+                def getObjId(self):
+                    return 201
+
+            class _Pointer:
+                def __init__(self, obj):
+                    self.obj = obj
+
+                def get(self):
+                    return self.obj
+
+            class _Output:
+                def __init__(self):
+                    self.ids = set()
+
+                def append(self, image):
+                    self.ids.add(1)
+
+                def __contains__(self, objId):
+                    return objId in self.ids
+
+                def getObjId(self):
+                    return 301
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = False
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.logicalInput = _Input()
+                    self.inputSet = _Pointer(self.logicalInput)
+                    self.finished = False
+                    self.output = _Output()
+                    self._persistedDoneIdsCache = (set(), set(), set())
+                    self.outputUpdateCalls = 0
+                    self.relationCalls = 0
+                    self.relationRows = []
+                    self.storeCalls = 0
+
+                def _getAllDoneIds(self):
+                    return MiffiProtMicrographs._getAllDoneIds(self)
+
+                def _outputNeedsSourceRelation(self, outputName):
+                    return MiffiProtMicrographs._outputNeedsSourceRelation(
+                        self, outputName
+                    )
+
+                def _retryPendingSourceRelations(self):
+                    return MiffiProtMicrographs._retryPendingSourceRelations(
+                        self
+                    )
+
+                def _loadInputSet(self, _unused=None):
+                    return self.logicalInput
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    assert outputName == miffi_module.OUTPUT
+                    return self.output
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    self.outputUpdateCalls += 1
+                    setattr(self, outputName, outputSet)
+
+                def getRelations(self):
+                    return list(self.relationRows)
+
+                def _defineSourceRelation(self, source, target):
+                    self.relationCalls += 1
+                    self.relationRows.append({
+                        "name": miffi_module.RELATION_SOURCE,
+                        "object_parent_id": 201,
+                        "object_child_id": 301,
+                    })
+                    if self.relationCalls == 1:
+                        raise RuntimeError(
+                            "simulated failure after relation persistence"
+                        )
+
+                def _store(self):
+                    self.storeCalls += 1
+
+                def error(self, _message):
+                    pass
+
+            protocol = _Harness()
+
+            with self.assertRaises(RuntimeError):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(1, protocol.relationCalls)
+            self.assertEqual(1, len(protocol.relationRows))
+            self.assertTrue(protocol.firstTime[miffi_module.OUTPUT])
+
+            MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                1,
+                protocol.relationCalls,
+                "A datasource relation that is already durable must not be "
+                "inserted again after an ambiguous persistence failure.",
+            )
+            self.assertEqual(
+                1,
+                len(protocol.relationRows),
+                "Native Scipion relation storage has no uniqueness guard, so "
+                "an ambiguous retry must not create a duplicate relation row.",
+            )
+            self.assertFalse(protocol.firstTime[miffi_module.OUTPUT])
+
+
 class TestMiffiResumeOutputRelationRegression(unittest.TestCase):
     def testInitializeParamsDoesNotTreatExistingOutputAsFirstPublication(self):
         class _Input:
