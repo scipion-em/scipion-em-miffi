@@ -2002,6 +2002,7 @@ class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
                     )
                     self.processedIds = [1]
                     self.insertedIds = [1]
+                    self._pendingInputIds = set()
                     self.outputCategorizeFiles = [
                         pklFile
                     ]
@@ -2062,6 +2063,13 @@ class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
                 1,
                 protocol.insertedIds,
                 "An unclassified id must become schedulable again.",
+            )
+
+            self.assertIn(
+                1,
+                protocol._pendingInputIds,
+                "An unclassified id below the streaming watermark must return "
+                "to pending input state so an open stream can retry it.",
             )
 
             self.assertEqual(

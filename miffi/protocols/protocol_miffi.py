@@ -610,6 +610,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         if imageId not in unclassifiedIds
                     ]
 
+                if hasattr(self, '_pendingInputIds'):
+                    self._pendingInputIds.update(unclassifiedIds)
+
         # Verify only the ids published by this batch. Set.__contains__()
         # delegates to the backend mapper's point lookup, so this avoids a
         # complete output scan while still confirming durable registration.
