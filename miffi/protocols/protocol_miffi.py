@@ -402,13 +402,28 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 )
 
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
-        inputSet = self._loadInputSet(self.inputFn)
-        inputIds = set(inputSet.getIdSet())
-        self.finished = self.isStreamClosed and set(doneListIds) == inputIds
+
+        # Exact input-id equality is only needed to decide terminal
+        # completion. Keep normal open-stream output polls off the O(N)
+        # input-id scan hot path.
+        inputSet = None
+        inputIds = None
+
+        if self.isStreamClosed:
+            inputSet = self._loadInputSet(self.inputFn)
+            inputIds = set(inputSet.getIdSet())
+            self.finished = set(doneListIds) == inputIds
+        else:
+            self.finished = False
 
         if not newDone:
             self._store()
             return
+
+        # Publishing new results still needs the input objects themselves,
+        # but an open stream does not need to enumerate every input id.
+        if inputSet is None:
+            inputSet = self._loadInputSet(self.inputFn)
 
         streamMode = Set.STREAM_OPEN
 

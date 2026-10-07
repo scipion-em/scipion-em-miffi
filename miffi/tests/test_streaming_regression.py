@@ -1079,6 +1079,45 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
         )
         self.assertEqual(2, protocol.storeCalls)
 
+    def testOpenIdleOutputPollDoesNotFullScanInputIds(self):
+        import threading
+
+        class _Input:
+            def getIdSet(self):
+                raise AssertionError(
+                    "Open MIFFI output polls must not full-scan all input ids."
+                )
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = False
+                self.inputFn = "logical-input"
+                self.finished = False
+                self.storeCalls = 0
+
+            def _getAllDoneIds(self):
+                return [], 0, [], []
+
+            def _loadInputSet(self, _inputFn):
+                return _Input()
+
+            def _store(self):
+                self.storeCalls += 1
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertFalse(
+            protocol.finished,
+            "An open stream cannot become terminal during an idle output poll.",
+        )
+        self.assertEqual(1, protocol.storeCalls)
+
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
         import os
         import pickle
