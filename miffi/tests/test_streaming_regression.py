@@ -300,6 +300,14 @@ class TestMiffiStreamingRegression(unittest.TestCase):
         )
         self.assertEqual(10, protocol._inputWatermark)
 
+        self.assertEqual(
+            {9, 10},
+            protocol._closedInputIdsCache,
+            "A complete terminal reconciliation in _checkNewInput must seed "
+            "the closed-input id cache so _checkNewOutput does not full-scan "
+            "the same logical input again in the same closure cycle.",
+        )
+
     def testReleasedLateVisibleIdBypassesNoChangeShortcut(self):
         protocol = _StreamingHarness()
 

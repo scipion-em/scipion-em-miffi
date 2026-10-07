@@ -401,6 +401,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     if imageId not in self.insertedIds
                 )
 
+                if len(reconciledIds) == expectedSize:
+                    self._closedInputIdsCache = set(reconciledIds)
+
         self.lastCheck = datetime.now()
         inputSet.close()
 
