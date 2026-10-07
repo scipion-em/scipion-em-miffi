@@ -508,14 +508,17 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 else:
                     unclassifiedIds.add(imageId)
 
-            if accepted:
+            # Publish only outputs that actually received still-pending
+            # candidates in this poll. Requeued result files can also contain
+            # ids that were made durable by an earlier partial publication.
+            if acceptedCandidateIds:
                 self._updateOutputSet(OUTPUT, outputSet, streamMode)
                 acceptedPublished = True
                 outputSet = getattr(self, OUTPUT, outputSet)
                 if self.firstTime[OUTPUT]:
                     self._defineSourceRelation(self.inputSet, outputSet)
                     self.firstTime[OUTPUT] = False
-            if rejected:
+            if rejectedCandidateIds:
                 self._updateOutputSet(
                     OUTPUT_DISCARDED, outputSetDiscarded, streamMode
                 )

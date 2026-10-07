@@ -725,6 +725,146 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
             self.assertEqual([logFile], protocol.outputCategorizeLogFiles)
 
 
+    def testPartialRetryUpdatesOnlyStillPendingOutput(self):
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_1_dict.pkl")
+            logFile = os.path.join(tmp, "batch_1.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump(
+                    {
+                        miffi_module.GOOD: ["mic_1.mrc"],
+                        miffi_module.BAD_FILM: ["mic_2.mrc"],
+                    },
+                    handle,
+                )
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Summary:
+                def set(self, _value):
+                    pass
+
+            class _Image:
+                def __init__(self, objId):
+                    self.objId = objId
+
+                def clone(self):
+                    return _Image(self.objId)
+
+                def getFileName(self):
+                    return os.path.join(tmp, "mic_%d.mrc" % self.objId)
+
+            class _Input:
+                def __contains__(self, objId):
+                    return objId in {1, 2}
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    return _Image(objId)
+
+            class _Output:
+                def __init__(self):
+                    self.ids = set()
+
+                def append(self, image):
+                    self.ids.add(image.objId)
+
+                def __contains__(self, objId):
+                    return objId in self.ids
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1, 2]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = False
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = [miffi_module.BAD_FILM]
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = object()
+                    self.acceptedOutput = _Output()
+                    self.discardedOutput = _Output()
+                    self._persistedDoneIdsCache = (set(), set(), set())
+                    self.acceptedUpdateCalls = 0
+                    self.discardedUpdateCalls = 0
+                    self.failDiscardedOnce = True
+
+                def _getAllDoneIds(self):
+                    return MiffiProtMicrographs._getAllDoneIds(self)
+
+                def _loadInputSet(self, _unused=None):
+                    return _Input()
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    if outputName == miffi_module.OUTPUT:
+                        return self.acceptedOutput
+                    return self.discardedOutput
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    if outputName == miffi_module.OUTPUT:
+                        self.acceptedUpdateCalls += 1
+                        setattr(self, outputName, outputSet)
+                        return
+
+                    self.discardedUpdateCalls += 1
+                    if self.failDiscardedOnce:
+                        self.failDiscardedOnce = False
+                        raise RuntimeError(
+                            "simulated discarded-output persistence failure"
+                        )
+                    setattr(self, outputName, outputSet)
+
+                def _defineSourceRelation(self, *_args):
+                    pass
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _store(self):
+                    pass
+
+                def error(self, _message):
+                    pass
+
+            protocol = _Harness()
+
+            with self.assertRaises(RuntimeError):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual([2], protocol.processedIds)
+            self.assertEqual({1}, protocol._persistedDoneIdsCache[0])
+
+            MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                1,
+                protocol.acceptedUpdateCalls,
+                "Retrying a partially persisted MIFFI batch must not update "
+                "an output whose candidate ids are already durable.",
+            )
+            self.assertEqual(2, protocol.discardedUpdateCalls)
+            self.assertEqual([], protocol.processedIds)
+            self.assertEqual({1, 2}, protocol._persistedDoneIdsCache[0])
+
+
     def testOutputUpdateFailureKeepsResultFilesPending(self):
         import pickle
         import tempfile
