@@ -450,6 +450,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             # released for a fresh processing attempt instead of replaying
             # the same result files forever.
             unclassifiedIds = set()
+            acceptedCandidateIds = set()
+            rejectedCandidateIds = set()
 
             for imageId in newDone:
                 # Set.getItem raises rather than returning None for a row
@@ -467,10 +469,12 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 if micName in accepted:
                     setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
                     outputSet.append(image)
+                    acceptedCandidateIds.add(imageId)
 
                 elif micName in rejected:
                     setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
                     outputSetDiscarded.append(image)
+                    rejectedCandidateIds.add(imageId)
 
                 else:
                     unclassifiedIds.add(imageId)
@@ -518,11 +522,48 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         if imageId not in unclassifiedIds
                     ]
 
-        # Re-read durable outputs after publishing without changing the
-        # historical _getAllDoneIds() call contract used by test/protocol
-        # overrides.
-        self._persistedDoneIdsCache = None
-        persistedDoneIds, _, _, _ = self._getAllDoneIds()
+        # Verify only the ids published by this batch. Set.__contains__()
+        # delegates to the backend mapper's point lookup, so this avoids a
+        # complete output scan while still confirming durable registration.
+        persistedAcceptedCandidates = set()
+        if acceptedCandidateIds:
+            canonicalAccepted = getattr(self, OUTPUT, outputSet)
+            persistedAcceptedCandidates = {
+                imageId
+                for imageId in acceptedCandidateIds
+                if imageId in canonicalAccepted
+            }
+
+        persistedDiscardedCandidates = set()
+        if rejectedCandidateIds:
+            canonicalDiscarded = getattr(
+                self,
+                OUTPUT_DISCARDED,
+                outputSetDiscarded,
+            )
+            persistedDiscardedCandidates = {
+                imageId
+                for imageId in rejectedCandidateIds
+                if imageId in canonicalDiscarded
+            }
+
+        persistedDoneIds = set(doneListIds)
+        persistedDoneIds.update(persistedAcceptedCandidates)
+        persistedDoneIds.update(persistedDiscardedCandidates)
+
+        cache = getattr(self, '_persistedDoneIdsCache', None)
+        if cache is not None:
+            _, acceptedIds, discardedIds = cache
+            acceptedIds = set(acceptedIds)
+            discardedIds = set(discardedIds)
+            acceptedIds.update(persistedAcceptedCandidates)
+            discardedIds.update(persistedDiscardedCandidates)
+            persistedDoneIds = acceptedIds.union(discardedIds)
+            self._persistedDoneIdsCache = (
+                set(persistedDoneIds),
+                acceptedIds,
+                discardedIds,
+            )
 
         # Results that were classified but could not be durably registered
         # must be replayed. Unclassified results are intentionally consumed:

@@ -802,6 +802,9 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def append(self, image):
                     self.appended.append(image.objId)
 
+                def __contains__(self, objId):
+                    return objId in self.appended
+
                 def _updateOutputSet(self, outputName, outputSet, streamMode):
                     pass
 
@@ -1075,6 +1078,166 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
             "only once instead of full-scanning the output Set every poll.",
         )
         self.assertEqual(2, protocol.storeCalls)
+
+    def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_dict.pkl")
+            logFile = os.path.join(tmp, "batch.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump(
+                    {miffi_module.GOOD: ["mic_2.mrc"]},
+                    handle,
+                )
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Summary:
+                def set(self, _value):
+                    pass
+
+            class _Image:
+                def __init__(self, objId):
+                    self.objId = objId
+
+                def clone(self):
+                    return _Image(self.objId)
+
+                def getFileName(self):
+                    return os.path.join(
+                        tmp,
+                        "mic_%d.mrc" % self.objId,
+                    )
+
+            class _Input:
+                def getIdSet(self):
+                    return {1, 2}
+
+                def __contains__(self, objId):
+                    return objId == 2
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    assert objId == 2
+                    return _Image(objId)
+
+            class _Output:
+                STREAM_OPEN = miffi_module.Set.STREAM_OPEN
+
+                def __init__(self):
+                    self.ids = {1}
+                    self.getIdSetCalls = 0
+                    self.candidateChecks = []
+
+                def loadAllProperties(self):
+                    pass
+
+                def getIdSet(self):
+                    self.getIdSetCalls += 1
+                    return set(self.ids)
+
+                def enableAppend(self):
+                    pass
+
+                def copyInfo(self, _inputSet):
+                    pass
+
+                def append(self, image):
+                    self.ids.add(image.objId)
+
+                def __contains__(self, objId):
+                    self.candidateChecks.append(objId)
+                    return objId in self.ids
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.outputMicrographs = _Output()
+                    self.processedIds = [2]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = False
+                    self.inputFn = "logical-input"
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: False,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.summaryVar = _Summary()
+                    self.inputSet = _Pointer(object())
+                    self.finished = False
+
+                def _getAllDoneIds(self):
+                    return MiffiProtMicrographs._getAllDoneIds(self)
+
+                def _loadInputSet(self, _inputFn):
+                    return _Input()
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    return MiffiProtMicrographs._loadOutputSet(
+                        self,
+                        outputName,
+                        suffix,
+                    )
+
+                def _updateOutputSet(
+                        self,
+                        outputName,
+                        outputSet,
+                        _streamMode,
+                ):
+                    setattr(self, outputName, outputSet)
+
+                def _defineSourceRelation(self, *_args):
+                    pass
+
+                def _plotMiffiLabelHistogram(self):
+                    pass
+
+                def _plotMiffiTimeEvolution(self):
+                    pass
+
+                def _store(self):
+                    pass
+
+                def error(self, _message):
+                    pass
+
+            protocol = _Harness()
+
+            with patch.object(
+                miffi_module,
+                "setLabel",
+                side_effect=lambda *_args, **_kwargs: None,
+            ), patch.object(
+                miffi_module,
+                "populate_and_update_categories",
+                return_value={},
+            ):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                1,
+                protocol.outputMicrographs.getIdSetCalls,
+                "Publishing a MIFFI batch must not invalidate the persisted "
+                "output cache and full-scan the complete output Set again.",
+            )
+            self.assertEqual(
+                [2],
+                protocol.outputMicrographs.candidateChecks,
+                "Durability after publishing must be verified with a "
+                "point lookup for the newly published candidate id.",
+            )
 
     def testLoadOutputSetRefreshesExistingLogicalOutputBeforeAppend(self):
         existingOutput = _RefreshRequiredMiffiOutput([1])
@@ -1498,8 +1661,14 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
                     return _Image()
 
             class _Output:
+                def __init__(self, persistedIds=()):
+                    self.persistedIds = set(persistedIds)
+
                 def append(self, image):
                     pass
+
+                def __contains__(self, objId):
+                    return objId in self.persistedIds
 
             class Harness:
                 def __init__(self):
@@ -1520,7 +1689,7 @@ class TestMiffiCanonicalOutputRegression(unittest.TestCase):
                     self._inputClass = object
                     self._baseName = "micrographs.sqlite"
                     self.provisional = _Output()
-                    self.canonical = _Output()
+                    self.canonical = _Output({1})
                     self.relationTarget = None
                     self.doneCalls = 0
 
