@@ -1795,6 +1795,9 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 return {1}
 
         class _Input:
+            def getSize(self):
+                return 1
+
             def getIdSet(self):
                 return {1}
 
@@ -2147,6 +2150,67 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
         self.assertTrue(existingOutput.loaded)
         self.assertTrue(existingOutput.appendEnabled)
         self.assertIs(inputs, existingOutput.copiedFrom)
+
+
+    def testClosedIncompleteOutputPollsReuseTerminalInputIds(self):
+        import threading
+
+        class _Input:
+            def __init__(self):
+                self.getIdSetCalls = 0
+
+            def getSize(self):
+                return 2
+
+            def getIdSet(self):
+                self.getIdSetCalls += 1
+                return {1, 2}
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.input = _Input()
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = True
+                self.finished = False
+                self._closedOutputReconciled = True
+                self.firstTime = {
+                    miffi_module.OUTPUT: False,
+                    miffi_module.OUTPUT_DISCARDED: False,
+                }
+                self.storeCalls = 0
+
+            def _getAllDoneIds(self):
+                # Output is still incomplete while workers are finishing.
+                return [1], 1, [1], []
+
+            def _loadInputSet(self, _unused=None):
+                return self.input
+
+            def _retryPendingSourceRelations(self):
+                return MiffiProtMicrographs._retryPendingSourceRelations(
+                    self
+                )
+
+            def _store(self):
+                self.storeCalls += 1
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewOutput(protocol)
+        MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertFalse(protocol.finished)
+        self.assertEqual(2, protocol.storeCalls)
+        self.assertEqual(
+            1,
+            protocol.input.getIdSetCalls,
+            "Once a closed input Set has been completely reconciled, MIFFI "
+            "must reuse that terminal id snapshot instead of full-scanning "
+            "the input Set on every output poll while workers finish.",
+        )
 
 
 class TestMiffiTerminalPersistenceRegression(unittest.TestCase):

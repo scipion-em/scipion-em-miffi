@@ -210,6 +210,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self._inputWatermark = 0
         self._pendingInputIds = set()
         self._closedOutputReconciled = False
+        self._closedInputIdsCache = None
         self.processedIds = [] # Ids to be register to output
         self.outputCategorizeFiles = []
         self.outputCategorizeLogFiles = []
@@ -497,7 +498,16 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         if self.isStreamClosed:
             inputSet = self._loadInputSet(None)
-            inputIds = set(inputSet.getIdSet())
+            inputIds = getattr(self, '_closedInputIdsCache', None)
+
+            if inputIds is None:
+                inputIds = set(inputSet.getIdSet())
+
+                # A closed PostgreSQL-backed Set may still be catching up
+                # visibility. Cache only a complete terminal snapshot.
+                if len(inputIds) == inputSet.getSize():
+                    self._closedInputIdsCache = set(inputIds)
+
             self.finished = set(doneListIds) == inputIds
         else:
             self.finished = False
