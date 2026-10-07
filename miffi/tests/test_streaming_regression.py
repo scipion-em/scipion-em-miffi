@@ -1095,6 +1095,128 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
             )
 
 
+    def testAmbiguousOutputFailureReconcilesDurableCandidate(self):
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_dict.pkl")
+            logFile = os.path.join(tmp, "batch.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump(
+                    {
+                        miffi_module.GOOD: ["1__mic_1.mrc"],
+                    },
+                    handle,
+                )
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Image:
+                def __init__(self, objId):
+                    self.objId = objId
+
+                def clone(self):
+                    return _Image(self.objId)
+
+                def getFileName(self):
+                    return os.path.join(tmp, "mic_1.mrc")
+
+            class _Input:
+                def __contains__(self, objId):
+                    return objId == 1
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    assert objId == 1
+                    return _Image(1)
+
+            class _Output:
+                def __init__(self, protocol):
+                    self.protocol = protocol
+                    self.stagedIds = set()
+
+                def append(self, image):
+                    self.stagedIds.add(image.objId)
+
+                def __contains__(self, objId):
+                    return objId in self.protocol.durableAcceptedIds
+
+                def loadAllProperties(self):
+                    pass
+
+                def getIdSet(self):
+                    return set(self.protocol.durableAcceptedIds)
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = False
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: False,
+                        miffi_module.OUTPUT_DISCARDED: False,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.inputSet = object()
+                    self.finished = False
+                    self.durableAcceptedIds = set()
+                    self.outputMicrographs = _Output(self)
+                    self._persistedDoneIdsCache = (set(), set(), set())
+                    self.outputUpdateCalls = 0
+
+                def _getAllDoneIds(self):
+                    return MiffiProtMicrographs._getAllDoneIds(self)
+
+                def _loadInputSet(self, _unused=None):
+                    return _Input()
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    assert outputName == miffi_module.OUTPUT
+                    return self.outputMicrographs
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    assert outputName == miffi_module.OUTPUT
+                    self.outputUpdateCalls += 1
+                    self.durableAcceptedIds.update(outputSet.stagedIds)
+                    raise RuntimeError(
+                        "simulated failure after durable output persistence"
+                    )
+
+                def error(self, _message):
+                    pass
+
+            protocol = _Harness()
+
+            with self.assertRaises(RuntimeError):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(1, protocol.outputUpdateCalls)
+            self.assertEqual(
+                {1},
+                protocol._persistedDoneIdsCache[0],
+                "When _updateOutputSet fails after the candidate is durable, "
+                "MIFFI must reconcile that committed progress instead of "
+                "keeping a stale pre-update durable-id cache.",
+            )
+            self.assertEqual(
+                [],
+                protocol.processedIds,
+                "A candidate confirmed durable after an ambiguous output "
+                "failure must leave the pending publication queue.",
+            )
+
+
 class _ExistingOutputSet:
     def __init__(self):
         self.enableAppendCalls = 0

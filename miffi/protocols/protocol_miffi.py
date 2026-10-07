@@ -528,6 +528,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         streamMode = Set.STREAM_OPEN
         acceptedPublished = False
         rejectedPublished = False
+        publishingOutputName = None
 
         try:
             categorized_micrographs = defaultdict(list)
@@ -621,16 +622,20 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             # candidates in this poll. Requeued result files can also contain
             # ids that were made durable by an earlier partial publication.
             if acceptedCandidateIds:
+                publishingOutputName = OUTPUT
                 self._updateOutputSet(OUTPUT, outputSet, streamMode)
+                publishingOutputName = None
                 acceptedPublished = True
                 outputSet = getattr(self, OUTPUT, outputSet)
                 if self.firstTime[OUTPUT]:
                     self._defineSourceRelation(self.inputSet, outputSet)
                     self.firstTime[OUTPUT] = False
             if rejectedCandidateIds:
+                publishingOutputName = OUTPUT_DISCARDED
                 self._updateOutputSet(
                     OUTPUT_DISCARDED, outputSetDiscarded, streamMode
                 )
+                publishingOutputName = None
                 rejectedPublished = True
                 outputSetDiscarded = getattr(
                     self, OUTPUT_DISCARDED, outputSetDiscarded
@@ -641,9 +646,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     )
                     self.firstTime[OUTPUT_DISCARDED] = False
         except Exception:
-            # One logical output may already have been committed before a
-            # later output/update step fails. Preserve that durable progress
-            # incrementally instead of replaying already-persisted ids.
+            # Preserve publications whose _updateOutputSet() call returned
+            # successfully using cheap point lookups. Only a failure that
+            # happened *inside* _updateOutputSet() is an ambiguous commit and
+            # needs a full durable-output reconciliation.
             persistedAcceptedBeforeFailure = set()
             if acceptedPublished:
                 canonicalAccepted = getattr(self, OUTPUT, outputSet)
@@ -663,6 +669,38 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     imageId for imageId in rejectedCandidateIds
                     if imageId in canonicalDiscarded
                 }
+
+            cacheBeforeRecovery = getattr(
+                self,
+                '_persistedDoneIdsCache',
+                None,
+            )
+
+            if publishingOutputName is not None:
+                try:
+                    self._persistedDoneIdsCache = None
+                    (
+                        _durableDoneIds,
+                        _durableSize,
+                        durableAcceptedIds,
+                        durableDiscardedIds,
+                    ) = self._getAllDoneIds()
+
+                    persistedAcceptedBeforeFailure.update(
+                        set(acceptedCandidateIds).intersection(
+                            durableAcceptedIds
+                        )
+                    )
+                    persistedDiscardedBeforeFailure.update(
+                        set(rejectedCandidateIds).intersection(
+                            durableDiscardedIds
+                        )
+                    )
+                except Exception:
+                    # Never mask the original publication error. Restore the
+                    # previous cache and keep the ambiguous candidate pending
+                    # if durable reconciliation itself cannot be completed.
+                    self._persistedDoneIdsCache = cacheBeforeRecovery
 
             persistedBeforeFailure = (
                 persistedAcceptedBeforeFailure
