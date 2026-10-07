@@ -68,6 +68,12 @@ CATEGORIES = [GOOD, BAD_SINGLE, BAD_FILM, BAD_DRIFT, BAD_MINOR_CRYSTALLINE, BAD_
 HISTROGRAM_PLOT = 'miffi_label_histogram.png'
 TIME_PLOT = 'miffi_label_time_evolution.png'
 
+
+def _getBatchMicName(micId, micName):
+    # Return the collision-safe filename used inside a MIFFI batch.
+    return '%s__%s' % (micId, os.path.basename(micName))
+
+
 class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
     """
     Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
@@ -554,8 +560,29 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
                 image = inputSet.getItem("id", imageId).clone()
                 micName = os.path.basename(image.getFileName())
+                batchMicName = _getBatchMicName(imageId, micName)
 
-                if micName in accepted:
+                if batchMicName in accepted:
+                    setLabel(
+                        image,
+                        MIFFI_LABEL,
+                        accepted[batchMicName]['label'],
+                    )
+                    outputSet.append(image)
+                    acceptedCandidateIds.add(imageId)
+
+                elif batchMicName in rejected:
+                    setLabel(
+                        image,
+                        MIFFI_LABEL,
+                        rejected[batchMicName]['label'],
+                    )
+                    outputSetDiscarded.append(image)
+                    rejectedCandidateIds.add(imageId)
+
+                # Compatibility with result files produced before batch
+                # filenames became collision-safe.
+                elif micName in accepted:
                     setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
                     outputSet.append(image)
                     acceptedCandidateIds.add(imageId)
@@ -896,7 +923,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
             micName = mic.getFileName()
             micFnOrig = os.path.abspath(micName)
-            micDest = os.path.join(batchDirTmp, os.path.basename(micName))
+            micDest = os.path.join(
+                batchDirTmp,
+                _getBatchMicName(micId, micName),
+            )
             copyFile(micFnOrig, micDest)
             preparedIds.append(micId)
 

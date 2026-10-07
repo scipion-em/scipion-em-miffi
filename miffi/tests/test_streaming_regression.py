@@ -1211,7 +1211,7 @@ class TestMiffiPrepareBatchVisibilityRegression(unittest.TestCase):
 
             self.assertEqual([], harness.errors)
             copiedFiles = os.listdir(batchDir)
-            self.assertEqual(["mic_1.mrc"], copiedFiles)
+            self.assertEqual(["1__mic_1.mrc"], copiedFiles)
 
     def testPrepareBatchExcludesMicThatNeverBecomesVisible(self):
         # Regression test: Set.getItem raises (UnboundLocalError) rather
@@ -2315,6 +2315,89 @@ class TestMiffiOutputIdentityRegression(unittest.TestCase):
         self.assertIs(inputs, outputSet.copiedFrom)
 
 
+class TestMiffiBatchInputIdentityRegression(unittest.TestCase):
+    def testPrepareBatchPreservesMicrographsWithSameBasename(self):
+        import os
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp:
+            firstDir = os.path.join(tmp, "first")
+            secondDir = os.path.join(tmp, "second")
+            os.makedirs(firstDir)
+            os.makedirs(secondDir)
+
+            firstMic = os.path.join(firstDir, "shared.mrc")
+            secondMic = os.path.join(secondDir, "shared.mrc")
+
+            with open(firstMic, "w") as handle:
+                handle.write("first")
+            with open(secondMic, "w") as handle:
+                handle.write("second")
+
+            class _Mic:
+                def __init__(self, fileName):
+                    self.fileName = fileName
+
+                def clone(self):
+                    return _Mic(self.fileName)
+
+                def getFileName(self):
+                    return self.fileName
+
+            class _Input:
+                def __init__(self):
+                    self.items = {
+                        1: _Mic(firstMic),
+                        2: _Mic(secondMic),
+                    }
+
+                def __contains__(self, micId):
+                    return micId in self.items
+
+                def getItem(self, field, micId):
+                    assert field == "id"
+                    return self.items[micId]
+
+            class _Harness:
+                MIC_VISIBILITY_MAX_ATTEMPTS = 1
+                MIC_VISIBILITY_RETRY_DELAY = 0
+
+                def __init__(self):
+                    self.input = _Input()
+                    self.errors = []
+
+                def _getTmpPath(self, name):
+                    return os.path.join(tmp, name)
+
+                def _loadInputSet(self, _unused=None):
+                    return self.input
+
+                def error(self, message):
+                    self.errors.append(message)
+
+            protocol = _Harness()
+
+            batchDir, preparedIds = MiffiProtMicrographs._prepareBatchWithIds(
+                protocol,
+                [1, 2],
+                1,
+            )
+
+            stagedFiles = sorted(
+                name
+                for name in os.listdir(batchDir)
+                if name.endswith(".mrc")
+            )
+
+            self.assertEqual([1, 2], preparedIds)
+            self.assertEqual(
+                2,
+                len(stagedFiles),
+                "Distinct logical micrographs with the same source basename "
+                "must not overwrite each other in a MIFFI batch workspace.",
+            )
+
+
 class TestMiffiBatchWorkspaceRegression(unittest.TestCase):
     def testInferenceCleansReusedBatchWorkspaceBeforeRunning(self):
         import tempfile
@@ -2367,7 +2450,7 @@ class TestMiffiBatchWorkspaceRegression(unittest.TestCase):
             self.assertEqual(batchDir, preparedDir)
             self.assertEqual([2], preparedIds)
             self.assertEqual(
-                ["mic_2.mrc"],
+                ["2__mic_2.mrc"],
                 sorted(os.listdir(preparedDir)),
                 "A reused temporary MIFFI batch directory must not retain micrographs from a previous run.",
             )
