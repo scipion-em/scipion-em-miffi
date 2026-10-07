@@ -594,6 +594,17 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 discardedIds,
             )
 
+        # processedIds is a queue of results still needing publication, not
+        # an execution history. Remove only ids whose durable output
+        # registration has been confirmed. Keep unpersisted ids queued for
+        # replay and preserve any results appended concurrently by workers.
+        with resultsLock:
+            self.processedIds = [
+                imageId
+                for imageId in self.processedIds
+                if imageId not in persistedDoneIds
+            ]
+
         # Results that were classified but could not be durably registered
         # must be replayed. Unclassified results are intentionally consumed:
         # their ids were released above so MIFFI can process them again from
