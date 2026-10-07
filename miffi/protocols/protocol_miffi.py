@@ -810,6 +810,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 if imageId not in persistedDoneIds
             ]
 
+            batchOwnership = getattr(
+                self,
+                '_scheduledInputBatchById',
+                None,
+            )
+            if batchOwnership is not None:
+                for imageId in persistedDoneIds:
+                    batchOwnership.pop(imageId, None)
+
         # Results that were classified but could not be durably registered
         # must be replayed. Unclassified results are intentionally consumed:
         # their ids were released above so MIFFI can process them again from

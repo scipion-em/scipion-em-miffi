@@ -2039,6 +2039,7 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [2]
+                    self._scheduledInputBatchById = {2: 7}
                     self.outputCategorizeFiles = [pklFile]
                     self.outputCategorizeLogFiles = [logFile]
                     self.isStreamClosed = False
@@ -2102,6 +2103,14 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 protocol.processedIds,
                 "Durably published MIFFI ids must leave processedIds so "
                 "future output polls do not rescan the full processing history.",
+            )
+
+            self.assertEqual(
+                {},
+                protocol._scheduledInputBatchById,
+                "Once a MIFFI id is durably published, its transient batch "
+                "ownership must be discarded instead of growing for the "
+                "entire lifetime of a long streaming protocol.",
             )
 
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
