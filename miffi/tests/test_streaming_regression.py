@@ -273,6 +273,9 @@ class TestMiffiStreamingRegression(unittest.TestCase):
             def isContinued(self):
                 return False
 
+            def _getAllDoneIds(self):
+                return [], 0, [], []
+
             def _insertNewImageSteps(self, newIds, batchSize):
                 ids = list(newIds)
                 self.scheduled.append((ids, batchSize))
@@ -2047,6 +2050,7 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [2]
+                    self.insertedIds = [2]
                     self._scheduledInputBatchById = {2: 7}
                     self.outputCategorizeFiles = [pklFile]
                     self.outputCategorizeLogFiles = [logFile]
@@ -2119,6 +2123,14 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 "Once a MIFFI id is durably published, its transient batch "
                 "ownership must be discarded instead of growing for the "
                 "entire lifetime of a long streaming protocol.",
+            )
+
+            self.assertEqual(
+                [],
+                protocol.insertedIds,
+                "Once a MIFFI id is durably published, insertedIds must no "
+                "longer retain it as historical state; durable outputs are "
+                "the authority for completed work.",
             )
 
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
@@ -3042,8 +3054,10 @@ class TestMiffiContinueRegression(unittest.TestCase):
         )
 
         self.assertEqual(
-            {1, 2, 3},
+            {3},
             set(protocol.insertedIds),
+            "Continue must keep only newly scheduled active ids in "
+            "insertedIds; durable ids belong to persisted outputs.",
         )
 
         self.assertTrue(
@@ -3186,6 +3200,9 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
 
             def isContinued(self):
                 return False
+
+            def _getAllDoneIds(self):
+                return [], 0, [], []
 
             def _insertNewImageSteps(self, newIds, _batchSize):
                 self.scheduledBatches.append(list(newIds))

@@ -375,14 +375,17 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.isStreamClosed = inputSet.isStreamClosed()
 
         # A producer can close after an id below the watermark becomes
-        # visible (for example id 10 was seen before id 9). Normal polls
-        # stay incremental; only a closed stream whose known logical ids
-        # do not yet match its reported size performs a full reconciliation.
+        # visible (for example id 10 was seen before id 9). insertedIds now
+        # contains only active work, so durable outputs provide the historical
+        # completed state during terminal reconciliation.
         if self.isStreamClosed:
             expectedSize = inputSet.getSize()
-            knownIds = set(self.insertedIds).union(pendingIds)
+            doneIds, _, _, _ = self._getAllDoneIds()
+            durableDoneIds = set(doneIds)
+            pendingIds.difference_update(durableDoneIds)
 
-            if len(knownIds) < expectedSize:
+            reconciledIds = getattr(self, '_closedInputIdsCache', None)
+            if reconciledIds is None:
                 try:
                     reconciledIds = list(
                         inputSet.getUniqueValues('id')
@@ -396,14 +399,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         max(reconciledIds),
                     )
 
-                pendingIds.update(
-                    imageId
-                    for imageId in reconciledIds
-                    if imageId not in self.insertedIds
-                )
-
                 if len(reconciledIds) == expectedSize:
                     self._closedInputIdsCache = set(reconciledIds)
+
+            pendingIds.update(
+                imageId
+                for imageId in reconciledIds
+                if imageId not in self.insertedIds
+                and imageId not in durableDoneIds
+            )
 
         self.lastCheck = datetime.now()
         inputSet.close()
@@ -418,7 +422,6 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     % skipIds
                 )
             pendingIds.difference_update(doneIds)
-            self.insertedIds = list(doneIds)
 
         newIds = sorted(
             imageId
@@ -729,6 +732,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         if imageId not in persistedBeforeFailure
                     ]
 
+                    insertedIds = getattr(self, 'insertedIds', None)
+                    if insertedIds is not None:
+                        self.insertedIds = [
+                            imageId
+                            for imageId in insertedIds
+                            if imageId not in persistedBeforeFailure
+                        ]
+
                     batchOwnership = getattr(
                         self,
                         '_scheduledInputBatchById',
@@ -818,6 +829,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 for imageId in self.processedIds
                 if imageId not in persistedDoneIds
             ]
+
+            insertedIds = getattr(self, 'insertedIds', None)
+            if insertedIds is not None:
+                self.insertedIds = [
+                    imageId
+                    for imageId in insertedIds
+                    if imageId not in persistedDoneIds
+                ]
 
             batchOwnership = getattr(
                 self,
