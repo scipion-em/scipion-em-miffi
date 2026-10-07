@@ -1311,6 +1311,39 @@ class TestMiffiLogicalInputIdentityRegression(unittest.TestCase):
         self.assertFalse(hasattr(protocol, "_inputType"))
 
 
+class TestMiffiResumeOutputRelationRegression(unittest.TestCase):
+    def testInitializeParamsDoesNotTreatExistingOutputAsFirstPublication(self):
+        class _Input:
+            def isStreamClosed(self):
+                return False
+
+        class _Harness:
+            def __init__(self):
+                self.inputSet = _Pointer(_Input())
+                # Simulate Resume: the accepted logical output already exists
+                # from the previous execution, while discarded does not.
+                self.outputMicrographs = object()
+
+            def _getDefinedLabels(self):
+                return [], []
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs.initializeParams(protocol)
+
+        self.assertFalse(
+            protocol.firstTime[miffi_module.OUTPUT],
+            "An existing logical MIFFI output must not be treated as a first "
+            "publication after Resume, otherwise the source relation is "
+            "inserted again.",
+        )
+        self.assertTrue(
+            protocol.firstTime[miffi_module.OUTPUT_DISCARDED],
+            "An output that does not exist yet must still create its source "
+            "relation on first publication.",
+        )
+
+
 class TestMiffiPersistedOutputRefresh(unittest.TestCase):
     def testDoneIdsRefreshPersistedAcceptedAndDiscardedOutputs(self):
         class Harness:

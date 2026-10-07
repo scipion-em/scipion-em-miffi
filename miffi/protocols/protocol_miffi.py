@@ -189,8 +189,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
     def initializeParams(self):
         self.finished = False
-        self.firstTime = {OUTPUT: True,
-                          OUTPUT_DISCARDED: True}
+        # Source relations belong to the logical outputs and survive Resume.
+        # Only outputs that do not exist yet need their relation defined on
+        # first publication in this execution.
+        self.firstTime = {
+            OUTPUT: not hasattr(self, OUTPUT),
+            OUTPUT_DISCARDED: not hasattr(self, OUTPUT_DISCARDED),
+        }
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self._inputWatermark = 0
