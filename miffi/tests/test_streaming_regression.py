@@ -1298,6 +1298,11 @@ class TestMiffiLogicalInputIdentityRegression(unittest.TestCase):
             def _getDefinedLabels(self):
                 return [], []
 
+            def _outputNeedsSourceRelation(self, outputName):
+                return MiffiProtMicrographs._outputNeedsSourceRelation(
+                    self, outputName
+                )
+
         protocol = _Harness()
 
         MiffiProtMicrographs.initializeParams(protocol)
@@ -1309,6 +1314,146 @@ class TestMiffiLogicalInputIdentityRegression(unittest.TestCase):
         )
         self.assertFalse(hasattr(protocol, "_inputClass"))
         self.assertFalse(hasattr(protocol, "_inputType"))
+
+
+class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
+    def testPersistedOutputRetriesMissingSourceRelationWithoutRepublishing(self):
+        import os
+        import pickle
+        import tempfile
+        import threading
+        from collections import defaultdict
+
+        with tempfile.TemporaryDirectory() as tmp:
+            pklFile = os.path.join(tmp, "batch_dict.pkl")
+            logFile = os.path.join(tmp, "batch.log")
+
+            with open(pklFile, "wb") as handle:
+                pickle.dump(
+                    {
+                        miffi_module.GOOD: ["mic_1.mrc"],
+                    },
+                    handle,
+                )
+            with open(logFile, "w") as handle:
+                handle.write("")
+
+            class _Image:
+                def clone(self):
+                    return self
+
+                def getFileName(self):
+                    return os.path.join(tmp, "mic_1.mrc")
+
+            class _Input:
+                def __contains__(self, objId):
+                    return objId == 1
+
+                def getItem(self, field, objId):
+                    assert field == "id"
+                    assert objId == 1
+                    return _Image()
+
+            class _Output:
+                def __init__(self):
+                    self.ids = set()
+
+                def append(self, image):
+                    self.ids.add(1)
+
+                def __contains__(self, objId):
+                    return objId in self.ids
+
+            class _Harness:
+                def __init__(self):
+                    self._resultsLock = threading.Lock()
+                    self.processedIds = [1]
+                    self.outputCategorizeFiles = [pklFile]
+                    self.outputCategorizeLogFiles = [logFile]
+                    self.isStreamClosed = False
+                    self.acceptedLabels = [miffi_module.GOOD]
+                    self.rejectedLabels = []
+                    self.firstTime = {
+                        miffi_module.OUTPUT: True,
+                        miffi_module.OUTPUT_DISCARDED: True,
+                    }
+                    self.labelHistory = defaultdict(list)
+                    self.timeHistory = []
+                    self.outputLog = {}
+                    self.inputSet = object()
+                    self.finished = False
+                    self.output = _Output()
+                    self._persistedDoneIdsCache = (set(), set(), set())
+                    self.outputUpdateCalls = 0
+                    self.relationCalls = 0
+                    self.storeCalls = 0
+
+                def _getAllDoneIds(self):
+                    return MiffiProtMicrographs._getAllDoneIds(self)
+
+                def _retryPendingSourceRelations(self):
+                    return MiffiProtMicrographs._retryPendingSourceRelations(
+                        self
+                    )
+
+                def _loadInputSet(self, _unused=None):
+                    return _Input()
+
+                def _loadOutputSet(self, outputName, suffix=""):
+                    assert outputName == miffi_module.OUTPUT
+                    return self.output
+
+                def _updateOutputSet(self, outputName, outputSet, streamMode):
+                    self.outputUpdateCalls += 1
+                    setattr(self, outputName, outputSet)
+
+                def _defineSourceRelation(self, source, target):
+                    self.relationCalls += 1
+                    if self.relationCalls == 1:
+                        raise RuntimeError(
+                            "simulated source-relation persistence failure"
+                        )
+
+                def _store(self):
+                    self.storeCalls += 1
+
+                def error(self, _message):
+                    pass
+
+            protocol = _Harness()
+
+            with self.assertRaises(RuntimeError):
+                MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                {1},
+                protocol._persistedDoneIdsCache[0],
+                "The successfully persisted output id must remain durable even "
+                "when relation creation fails afterwards.",
+            )
+            self.assertEqual(
+                [],
+                protocol.processedIds,
+                "A durably published id must not be republished just because "
+                "source-relation creation failed.",
+            )
+            self.assertEqual(1, protocol.outputUpdateCalls)
+            self.assertEqual(1, protocol.relationCalls)
+
+            MiffiProtMicrographs._checkNewOutput(protocol)
+
+            self.assertEqual(
+                1,
+                protocol.outputUpdateCalls,
+                "Retrying a missing source relation must not republish an "
+                "already durable output candidate.",
+            )
+            self.assertEqual(
+                2,
+                protocol.relationCalls,
+                "A source relation that failed before being inserted must be "
+                "retried even when there are no new output candidates.",
+            )
 
 
 class TestMiffiResumeOutputRelationRegression(unittest.TestCase):
@@ -1326,6 +1471,11 @@ class TestMiffiResumeOutputRelationRegression(unittest.TestCase):
 
             def _getDefinedLabels(self):
                 return [], []
+
+            def _outputNeedsSourceRelation(self, outputName):
+                return MiffiProtMicrographs._outputNeedsSourceRelation(
+                    self, outputName
+                )
 
         protocol = _Harness()
 
@@ -1392,6 +1542,10 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 self.isStreamClosed = False
                 self.inputFn = "logical-input"
                 self.finished = False
+                self.firstTime = {
+                    miffi_module.OUTPUT: False,
+                    miffi_module.OUTPUT_DISCARDED: False,
+                }
                 self.storeCalls = 0
 
             def _getAllDoneIds(self):
@@ -1399,6 +1553,11 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
 
             def _loadInputSet(self, _inputFn):
                 return _Input()
+
+            def _retryPendingSourceRelations(self):
+                return MiffiProtMicrographs._retryPendingSourceRelations(
+                    self
+                )
 
             def _store(self):
                 self.storeCalls += 1
@@ -1434,6 +1593,10 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 self.isStreamClosed = False
                 self.inputFn = "logical-input"
                 self.finished = False
+                self.firstTime = {
+                    miffi_module.OUTPUT: False,
+                    miffi_module.OUTPUT_DISCARDED: False,
+                }
                 self.storeCalls = 0
 
             def _getAllDoneIds(self):
@@ -1441,6 +1604,11 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
 
             def _loadInputSet(self, _inputFn):
                 return _Input()
+
+            def _retryPendingSourceRelations(self):
+                return MiffiProtMicrographs._retryPendingSourceRelations(
+                    self
+                )
 
             def _store(self):
                 self.storeCalls += 1
@@ -1484,6 +1652,10 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 self.isStreamClosed = True
                 self.inputFn = "logical-input"
                 self.finished = False
+                self.firstTime = {
+                    miffi_module.OUTPUT: False,
+                    miffi_module.OUTPUT_DISCARDED: False,
+                }
                 self.storeCalls = 0
 
             def _getAllDoneIds(self):
@@ -1491,6 +1663,11 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
 
             def _loadInputSet(self, _inputFn):
                 return _Input()
+
+            def _retryPendingSourceRelations(self):
+                return MiffiProtMicrographs._retryPendingSourceRelations(
+                    self
+                )
 
             def _store(self):
                 self.storeCalls += 1
@@ -1902,6 +2079,10 @@ class TestMiffiTerminalCompletionRegression(unittest.TestCase):
                 self.isStreamClosed = True
                 self.inputFn = "logical-input"
                 self.finished = False
+                self.firstTime = {
+                    miffi_module.OUTPUT: False,
+                    miffi_module.OUTPUT_DISCARDED: False,
+                }
 
             def _getAllDoneIds(self):
                 # Same cardinality as the input, but not the same logical IDs.
@@ -1909,6 +2090,11 @@ class TestMiffiTerminalCompletionRegression(unittest.TestCase):
 
             def _loadInputSet(self, _inputFn):
                 return _Input()
+
+            def _retryPendingSourceRelations(self):
+                return MiffiProtMicrographs._retryPendingSourceRelations(
+                    self
+                )
 
             def _store(self):
                 pass

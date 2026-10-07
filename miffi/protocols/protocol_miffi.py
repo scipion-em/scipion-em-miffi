@@ -40,6 +40,7 @@ from collections import defaultdict, Counter
 import matplotlib.pyplot as plt
 
 from pyworkflow.protocol import STEPS_PARALLEL, ProtStreamingBase
+from pyworkflow.object import RELATION_SOURCE
 import pyworkflow.protocol.params as params
 from pyworkflow.utils import prettyTime, Message
 from pyworkflow.utils.path import makePath, copyFile, copyTree, cleanPath
@@ -193,8 +194,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # Only outputs that do not exist yet need their relation defined on
         # first publication in this execution.
         self.firstTime = {
-            OUTPUT: not hasattr(self, OUTPUT),
-            OUTPUT_DISCARDED: not hasattr(self, OUTPUT_DISCARDED),
+            OUTPUT: self._outputNeedsSourceRelation(OUTPUT),
+            OUTPUT_DISCARDED: self._outputNeedsSourceRelation(
+                OUTPUT_DISCARDED
+            ),
         }
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
@@ -213,6 +216,57 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.timeHistory = []
         # The input Pointer/Set is the logical identity. Do not persist or
         # reconstruct streaming state from a physical Set backing filename.
+
+    def _outputNeedsSourceRelation(self, outputName):
+        # Return whether outputName still needs its datasource relation.
+        outputSet = getattr(self, outputName, None)
+        if outputSet is None:
+            return True
+
+        getRelations = getattr(self, 'getRelations', None)
+        if not callable(getRelations):
+            # Lightweight harnesses cannot inspect persisted relations.
+            # Preserve the previous safe assumption for an existing output.
+            return False
+
+        outputGetObjId = getattr(outputSet, 'getObjId', None)
+        inputObject = self.inputSet.get()
+        inputGetObjId = getattr(inputObject, 'getObjId', None)
+
+        if not callable(outputGetObjId) or not callable(inputGetObjId):
+            return False
+
+        outputId = outputGetObjId()
+        inputId = inputGetObjId()
+
+        if outputId is None or inputId is None:
+            return False
+
+        for relation in getRelations():
+            try:
+                isSource = relation['name'] == RELATION_SOURCE
+                sameParent = relation['object_parent_id'] == inputId
+                sameChild = relation['object_child_id'] == outputId
+            except (KeyError, TypeError):
+                continue
+
+            if isSource and sameParent and sameChild:
+                return False
+
+        return True
+
+    def _retryPendingSourceRelations(self):
+        # Retry relations whose output persisted before relation creation.
+        for outputName in (OUTPUT, OUTPUT_DISCARDED):
+            if not self.firstTime.get(outputName, False):
+                continue
+
+            outputSet = getattr(self, outputName, None)
+            if outputSet is None:
+                continue
+
+            self._defineSourceRelation(self.inputSet, outputSet)
+            self.firstTime[outputName] = False
 
     def _getDefinedLabels(self):
         categories = {
@@ -434,6 +488,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             self.finished = False
 
         if not newDone:
+            self._retryPendingSourceRelations()
             self._store()
             return
 
