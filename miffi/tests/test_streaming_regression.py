@@ -1007,6 +1007,50 @@ class _RefreshRequiredMiffiOutput:
         self.copiedFrom = inputs
 
 
+class TestMiffiLogicalInputIdentityRegression(unittest.TestCase):
+    def testInitializeParamsDoesNotReadInputBackingFileName(self):
+        class _Input:
+            def isStreamClosed(self):
+                return False
+
+            def getFileName(self):
+                raise AssertionError(
+                    "MIFFI streaming initialization must not depend on the "
+                    "input Set backing filename."
+                )
+
+            def getClass(self):
+                raise AssertionError(
+                    "Unused input implementation class must not be captured "
+                    "during streaming initialization."
+                )
+
+            def getClassName(self):
+                raise AssertionError(
+                    "Unused input implementation type must not be captured "
+                    "during streaming initialization."
+                )
+
+        class _Harness:
+            def __init__(self):
+                self.inputSet = _Pointer(_Input())
+
+            def _getDefinedLabels(self):
+                return [], []
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs.initializeParams(protocol)
+
+        self.assertFalse(protocol.isStreamClosed)
+        self.assertFalse(
+            hasattr(protocol, "inputFn"),
+            "MIFFI must not persist a backing filename as logical input identity.",
+        )
+        self.assertFalse(hasattr(protocol, "_inputClass"))
+        self.assertFalse(hasattr(protocol, "_inputType"))
+
+
 class TestMiffiPersistedOutputRefresh(unittest.TestCase):
     def testDoneIdsRefreshPersistedAcceptedAndDiscardedOutputs(self):
         class Harness:

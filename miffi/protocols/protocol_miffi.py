@@ -206,10 +206,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # Plot variables
         self.labelHistory = defaultdict(list)
         self.timeHistory = []
-        # Contains images that have been processed in a Step (checkNewOutput).
-        self.inputFn = self.inputSet.get().getFileName()
-        self._inputClass = self.inputSet.get().getClass()
-        self._inputType = self.inputSet.get().getClassName().split('SetOf')[1]
+        # The input Pointer/Set is the logical identity. Do not persist or
+        # reconstruct streaming state from a physical Set backing filename.
 
     def _getDefinedLabels(self):
         categories = {
@@ -261,7 +259,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.lastCheck = getattr(self, 'lastCheck', datetime.now())
         self.debug('Last check: %s' % prettyTime(self.lastCheck))
 
-        inputSet = self._loadInputSet(self.inputFn)
+        inputSet = self._loadInputSet(None)
         watermark = getattr(self, '_inputWatermark', 0)
         pendingIds = getattr(self, '_pendingInputIds', None)
         if pendingIds is None:
@@ -424,7 +422,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         inputIds = None
 
         if self.isStreamClosed:
-            inputSet = self._loadInputSet(self.inputFn)
+            inputSet = self._loadInputSet(None)
             inputIds = set(inputSet.getIdSet())
             self.finished = set(doneListIds) == inputIds
         else:
@@ -437,7 +435,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # Publishing new results still needs the input objects themselves,
         # but an open stream does not need to enumerate every input id.
         if inputSet is None:
-            inputSet = self._loadInputSet(self.inputFn)
+            inputSet = self._loadInputSet(None)
 
         streamMode = Set.STREAM_OPEN
 
@@ -650,8 +648,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         self._store()
 
-    def _loadInputSet(self, inputFn):
-        self.debug("Reloading input set: %s" % inputFn)
+    def _loadInputSet(self, _unusedInputIdentity=None):
+        self.debug("Reloading logical input Set.")
         inputSet = self.inputSet.get()
         inputSet.close()
         inputSet.load()
@@ -750,7 +748,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
         cleanPath(batchDirTmp)
         makePath(batchDirTmp)
-        inputMicSet = self._loadInputSet(self.inputFn)
+        inputMicSet = self._loadInputSet(None)
         preparedIds = []
 
         for micId in newIds:
@@ -762,7 +760,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             for attempt in range(self.MIC_VISIBILITY_MAX_ATTEMPTS):
                 if attempt > 0:
                     time.sleep(self.MIC_VISIBILITY_RETRY_DELAY)
-                    inputMicSet = self._loadInputSet(self.inputFn)
+                    inputMicSet = self._loadInputSet(None)
 
                 if micId in inputMicSet:
                     mic = inputMicSet.getItem("id", micId).clone()
