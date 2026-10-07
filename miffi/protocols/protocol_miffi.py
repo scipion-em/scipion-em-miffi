@@ -207,6 +207,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         }
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
+        self._scheduledInputBatchById = {}
         self._inputWatermark = 0
         self._pendingInputIds = set()
         self._closedOutputReconciled = False
@@ -880,12 +881,20 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             newIds: input images ids to be processed
         """
         deps = []
+        batchOwnership = getattr(self, '_scheduledInputBatchById', None)
+        if batchOwnership is None:
+            batchOwnership = {}
+            self._scheduledInputBatchById = batchOwnership
+
         # Loop through the image IDs in batches
         for i in range(0, len(newIds), batchSize):
             batchIds = newIds[i:i + batchSize]
             if len(batchIds) == batchSize or self.isStreamClosed:
-                stepId = self._insertFunctionStep(self.miffStep, batchIds, self.counterBatch, needsGPU=True,
+                batchNumber = self.counterBatch
+                stepId = self._insertFunctionStep(self.miffStep, batchIds, batchNumber, needsGPU=True,
                                               prerequisites=[])
+                for imageId in batchIds:
+                    batchOwnership[imageId] = batchNumber
                 self.counterBatch += 1
                 self.insertedIds.extend(batchIds)
                 deps.append(stepId)
@@ -904,9 +913,25 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 resultsLock = self._resultsLock
 
             with resultsLock:
+                batchOwnership = getattr(
+                    self,
+                    '_scheduledInputBatchById',
+                    None,
+                )
+
+                if batchOwnership is None:
+                    # Backwards-compatible path for lightweight harnesses.
+                    releasableMissingIds = set(missingIds)
+                else:
+                    releasableMissingIds = {
+                        imageId
+                        for imageId in missingIds
+                        if batchOwnership.get(imageId) == counterBatch
+                    }
+
                 self.insertedIds = [
                     imageId for imageId in self.insertedIds
-                    if imageId not in missingIds
+                    if imageId not in releasableMissingIds
                 ]
 
                 pendingInputIds = getattr(
@@ -915,7 +940,11 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     None,
                 )
                 if pendingInputIds is not None:
-                    pendingInputIds.update(missingIds)
+                    pendingInputIds.update(releasableMissingIds)
+
+                if batchOwnership is not None:
+                    for imageId in releasableMissingIds:
+                        batchOwnership.pop(imageId, None)
 
         try:
             if not preparedIds:

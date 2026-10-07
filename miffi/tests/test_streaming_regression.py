@@ -3199,6 +3199,51 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
             )
 
 
+    def testStaleInvisibleBatchDoesNotReleaseIdOwnedByNewerBatch(self):
+        import threading
+
+        class _Harness:
+            def __init__(self):
+                self.insertedIds = [7]
+                self._pendingInputIds = set()
+                self._scheduledInputBatchById = {7: 2}
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self._resultsLock = threading.Lock()
+                self.isStreamClosed = True
+                self.deletedBatches = []
+
+            def _prepareBatchWithIds(self, newIds, counterBatch):
+                self.assertedNewIds = list(newIds)
+                self.assertedCounterBatch = counterBatch
+                return "/tmp/miffi-stale-invisible-batch", []
+
+            def deleteBatch(self, batchDir):
+                self.deletedBatches.append(batchDir)
+
+            def info(self, _message):
+                pass
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs.miffStep(protocol, [7], 1)
+
+        self.assertEqual([7], protocol.insertedIds)
+        self.assertNotIn(
+            7,
+            protocol._pendingInputIds,
+            "A stale worker from batch 1 must not release an id that has "
+            "already been rescheduled and is currently owned by batch 2.",
+        )
+        self.assertEqual(
+            {7: 2},
+            protocol._scheduledInputBatchById,
+            "The newer batch ownership must survive completion of an older "
+            "visibility-retry worker for the same logical micrograph.",
+        )
+
+
 class TestMiffiStreamingArchitectureRegression(unittest.TestCase):
     def testProtocolUsesProtStreamingBaseInfrastructure(self):
         self.assertTrue(
