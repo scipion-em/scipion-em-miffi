@@ -2133,6 +2133,19 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 "the authority for completed work.",
             )
 
+            self.assertEqual(
+                1,
+                protocol.labelCounts[miffi_module.GOOD],
+                "MIFFI label statistics must use cumulative counters instead "
+                "of retaining one placeholder object per processed image.",
+            )
+            self.assertEqual(
+                0,
+                sum(len(items) for items in protocol.labelHistory.values()),
+                "Legacy labelHistory must not grow with the number of "
+                "processed micrographs.",
+            )
+
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
         import os
         import pickle

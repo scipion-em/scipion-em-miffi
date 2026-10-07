@@ -199,12 +199,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # Source relations belong to the logical outputs and survive Resume.
         # Only outputs that do not exist yet need their relation defined on
         # first publication in this execution.
-        self.firstTime = {
-            OUTPUT: self._outputNeedsSourceRelation(OUTPUT),
-            OUTPUT_DISCARDED: self._outputNeedsSourceRelation(
-                OUTPUT_DISCARDED
-            ),
-        }
+        self.firstTime = {OUTPUT: self._outputNeedsSourceRelation(OUTPUT),
+                          OUTPUT_DISCARDED: self._outputNeedsSourceRelation(OUTPUT_DISCARDED)}
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self._scheduledInputBatchById = {}
@@ -219,7 +215,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.outputLog = {}
         self.counterBatch = 1
         self.isStreamClosed = self.inputSet.get().isStreamClosed()
-        # Plot variables
+        # Plot variables. Keep cumulative label counts bounded by the
+        # number of categories instead of one placeholder per micrograph.
+        self.labelCounts = Counter()
         self.labelHistory = defaultdict(list)
         self.timeHistory = []
         # The input Pointer/Set is the logical identity. Do not persist or
@@ -343,29 +341,16 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             self._pendingInputIds = pendingIds
 
         try:
-            discoveredIds = list(
-                inputSet.getUniqueValues(
-                    'id',
-                    where='id > %d' % watermark,
-                )
-            )
+            discoveredIds = list(inputSet.getUniqueValues('id', where='id > %d' % watermark))
         except (AttributeError, NotImplementedError):
             # Compatibility fallback for Set-like implementations that do
             # not support filtered unique values. Native Scipion Set mappers
             # use the incremental query above.
             getUniqueValues = getattr(inputSet, 'getUniqueValues', None)
             if callable(getUniqueValues):
-                discoveredIds = [
-                    itemId
-                    for itemId in getUniqueValues('id')
-                    if itemId > watermark
-                ]
+                discoveredIds = [itemId for itemId in getUniqueValues('id') if itemId > watermark]
             else:
-                discoveredIds = [
-                    itemId
-                    for itemId in inputSet.getIdSet()
-                    if itemId > watermark
-                ]
+                discoveredIds = [itemId for itemId in inputSet.getIdSet() if itemId > watermark]
 
         discoveredIds = sorted(discoveredIds)
         if discoveredIds:
@@ -387,27 +372,18 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             reconciledIds = getattr(self, '_closedInputIdsCache', None)
             if reconciledIds is None:
                 try:
-                    reconciledIds = list(
-                        inputSet.getUniqueValues('id')
-                    )
+                    reconciledIds = list(inputSet.getUniqueValues('id'))
                 except (AttributeError, NotImplementedError):
                     reconciledIds = list(inputSet.getIdSet())
 
                 if reconciledIds:
-                    self._inputWatermark = max(
-                        self._inputWatermark,
-                        max(reconciledIds),
-                    )
+                    self._inputWatermark = max(self._inputWatermark, max(reconciledIds))
 
                 if len(reconciledIds) == expectedSize:
                     self._closedInputIdsCache = set(reconciledIds)
 
-            pendingIds.update(
-                imageId
-                for imageId in reconciledIds
-                if imageId not in self.insertedIds
-                and imageId not in durableDoneIds
-            )
+            pendingIds.update(imageId for imageId in reconciledIds
+                              if imageId not in self.insertedIds and imageId not in durableDoneIds)
 
         self.lastCheck = datetime.now()
         inputSet.close()
@@ -417,17 +393,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             doneIds = set(doneIds)
             skipIds = sorted(pendingIds.intersection(doneIds))
             if skipIds:
-                self.info(
-                    "Skipping Images with ID: %s, seems to be done"
-                    % skipIds
-                )
+                self.info("Skipping Images with ID: %s, seems to be done" % skipIds)
             pendingIds.difference_update(doneIds)
 
-        newIds = sorted(
-            imageId
-            for imageId in pendingIds
-            if imageId not in self.insertedIds
-        )
+        newIds = sorted(imageId for imageId in pendingIds if imageId not in self.insertedIds)
 
         # Now handle the steps depending on the streaming batch size.
         streamingBatchSize = self.streamingBatchSize.get()
@@ -435,17 +404,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             return
 
         if newIds:
-            streamingBatchSize = (
-                len(newIds)
-                if streamingBatchSize == 0
-                else streamingBatchSize
-            )
+            streamingBatchSize = len(newIds) if streamingBatchSize == 0 else streamingBatchSize
 
             insertedBefore = set(self.insertedIds)
-            fDeps = self._insertNewImageSteps(
-                newIds,
-                streamingBatchSize,
-            )
+            fDeps = self._insertNewImageSteps(newIds, streamingBatchSize)
             scheduledIds = set(self.insertedIds).difference(insertedBefore)
             pendingIds.difference_update(scheduledIds)
 
@@ -458,10 +420,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # input stream closes, rebuild it exactly once from durable outputs
         # so Resume/recovery cannot make terminal completion depend on a
         # stale in-memory snapshot. Subsequent closed polls stay incremental.
-        if (
-            self.isStreamClosed
-            and not getattr(self, '_closedOutputReconciled', False)
-        ):
+        if self.isStreamClosed and not getattr(self, '_closedOutputReconciled', False):
             self._persistedDoneIdsCache = None
 
         doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
@@ -480,20 +439,14 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         with resultsLock:
             processedIds = copy.deepcopy(self.processedIds)
             outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
-            outputCategorizeLogFiles = copy.deepcopy(
-                self.outputCategorizeLogFiles
-            )
+            outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
             self.outputCategorizeFiles = []
             self.outputCategorizeLogFiles = []
 
         def requeuePendingResults():
             with resultsLock:
-                self.outputCategorizeFiles = (
-                    outputCategorizeFiles + self.outputCategorizeFiles
-                )
-                self.outputCategorizeLogFiles = (
-                    outputCategorizeLogFiles + self.outputCategorizeLogFiles
-                )
+                self.outputCategorizeFiles = outputCategorizeFiles + self.outputCategorizeFiles
+                self.outputCategorizeLogFiles = outputCategorizeLogFiles + self.outputCategorizeLogFiles
 
         newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
 
@@ -562,9 +515,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             if accepted:
                 outputSet = self._loadOutputSet(OUTPUT)
             if rejected:
-                outputSetDiscarded = self._loadOutputSet(
-                    OUTPUT_DISCARDED, suffix="_discarded"
-                )
+                outputSetDiscarded = self._loadOutputSet(OUTPUT_DISCARDED, suffix="_discarded")
 
             # Assign micrographs to their sets with attributes.
             # Keep track of processed ids for which this result snapshot
@@ -590,20 +541,12 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 batchMicName = _getBatchMicName(imageId, micName)
 
                 if batchMicName in accepted:
-                    setLabel(
-                        image,
-                        MIFFI_LABEL,
-                        accepted[batchMicName]['label'],
-                    )
+                    setLabel(image, MIFFI_LABEL, accepted[batchMicName]['label'])
                     outputSet.append(image)
                     acceptedCandidateIds.add(imageId)
 
                 elif batchMicName in rejected:
-                    setLabel(
-                        image,
-                        MIFFI_LABEL,
-                        rejected[batchMicName]['label'],
-                    )
+                    setLabel(image, MIFFI_LABEL, rejected[batchMicName]['label'])
                     outputSetDiscarded.append(image)
                     rejectedCandidateIds.add(imageId)
 
@@ -636,18 +579,12 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     self.firstTime[OUTPUT] = False
             if rejectedCandidateIds:
                 publishingOutputName = OUTPUT_DISCARDED
-                self._updateOutputSet(
-                    OUTPUT_DISCARDED, outputSetDiscarded, streamMode
-                )
+                self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
                 publishingOutputName = None
                 rejectedPublished = True
-                outputSetDiscarded = getattr(
-                    self, OUTPUT_DISCARDED, outputSetDiscarded
-                )
+                outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
                 if self.firstTime[OUTPUT_DISCARDED]:
-                    self._defineSourceRelation(
-                        self.inputSet, outputSetDiscarded
-                    )
+                    self._defineSourceRelation(self.inputSet, outputSetDiscarded)
                     self.firstTime[OUTPUT_DISCARDED] = False
         except Exception:
             # Preserve publications whose _updateOutputSet() call returned
@@ -664,52 +601,28 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
             persistedDiscardedBeforeFailure = set()
             if rejectedPublished:
-                canonicalDiscarded = getattr(
-                    self,
-                    OUTPUT_DISCARDED,
-                    outputSetDiscarded,
-                )
+                canonicalDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
                 persistedDiscardedBeforeFailure = {
                     imageId for imageId in rejectedCandidateIds
                     if imageId in canonicalDiscarded
                 }
 
-            cacheBeforeRecovery = getattr(
-                self,
-                '_persistedDoneIdsCache',
-                None,
-            )
+            cacheBeforeRecovery = getattr(self, '_persistedDoneIdsCache', None)
 
             if publishingOutputName is not None:
                 try:
                     self._persistedDoneIdsCache = None
-                    (
-                        _durableDoneIds,
-                        _durableSize,
-                        durableAcceptedIds,
-                        durableDiscardedIds,
-                    ) = self._getAllDoneIds()
+                    _durableDoneIds, _durableSize, durableAcceptedIds, durableDiscardedIds = self._getAllDoneIds()
 
-                    persistedAcceptedBeforeFailure.update(
-                        set(acceptedCandidateIds).intersection(
-                            durableAcceptedIds
-                        )
-                    )
-                    persistedDiscardedBeforeFailure.update(
-                        set(rejectedCandidateIds).intersection(
-                            durableDiscardedIds
-                        )
-                    )
+                    persistedAcceptedBeforeFailure.update(set(acceptedCandidateIds).intersection(durableAcceptedIds))
+                    persistedDiscardedBeforeFailure.update(set(rejectedCandidateIds).intersection(durableDiscardedIds))
                 except Exception:
                     # Never mask the original publication error. Restore the
                     # previous cache and keep the ambiguous candidate pending
                     # if durable reconciliation itself cannot be completed.
                     self._persistedDoneIdsCache = cacheBeforeRecovery
 
-            persistedBeforeFailure = (
-                persistedAcceptedBeforeFailure
-                | persistedDiscardedBeforeFailure
-            )
+            persistedBeforeFailure = persistedAcceptedBeforeFailure | persistedDiscardedBeforeFailure
 
             if persistedBeforeFailure:
                 cache = getattr(self, '_persistedDoneIdsCache', None)
@@ -719,32 +632,18 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     discardedIds = set(discardedIds)
                     acceptedIds.update(persistedAcceptedBeforeFailure)
                     discardedIds.update(persistedDiscardedBeforeFailure)
-                    self._persistedDoneIdsCache = (
-                        acceptedIds.union(discardedIds),
-                        acceptedIds,
-                        discardedIds,
-                    )
+                    self._persistedDoneIdsCache = (acceptedIds.union(discardedIds), acceptedIds, discardedIds)
 
                 with resultsLock:
-                    self.processedIds = [
-                        imageId
-                        for imageId in self.processedIds
-                        if imageId not in persistedBeforeFailure
-                    ]
+                    self.processedIds = [imageId for imageId in self.processedIds
+                                         if imageId not in persistedBeforeFailure]
 
                     insertedIds = getattr(self, 'insertedIds', None)
                     if insertedIds is not None:
-                        self.insertedIds = [
-                            imageId
-                            for imageId in insertedIds
-                            if imageId not in persistedBeforeFailure
-                        ]
+                        self.insertedIds = [imageId for imageId in insertedIds
+                                            if imageId not in persistedBeforeFailure]
 
-                    batchOwnership = getattr(
-                        self,
-                        '_scheduledInputBatchById',
-                        None,
-                    )
+                    batchOwnership = getattr(self, '_scheduledInputBatchById', None)
                     if batchOwnership is not None:
                         for imageId in persistedBeforeFailure:
                             batchOwnership.pop(imageId, None)
@@ -754,24 +653,12 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         if unclassifiedIds:
             with resultsLock:
-                self.processedIds = [
-                    imageId
-                    for imageId in self.processedIds
-                    if imageId not in unclassifiedIds
-                ]
+                self.processedIds = [imageId for imageId in self.processedIds if imageId not in unclassifiedIds]
 
-                insertedIds = getattr(
-                    self,
-                    "insertedIds",
-                    None,
-                )
+                insertedIds = getattr(self, "insertedIds", None)
 
                 if insertedIds is not None:
-                    self.insertedIds = [
-                        imageId
-                        for imageId in insertedIds
-                        if imageId not in unclassifiedIds
-                    ]
+                    self.insertedIds = [imageId for imageId in insertedIds if imageId not in unclassifiedIds]
 
                 if hasattr(self, '_pendingInputIds'):
                     self._pendingInputIds.update(unclassifiedIds)
@@ -790,11 +677,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
         persistedDiscardedCandidates = set()
         if rejectedCandidateIds:
-            canonicalDiscarded = getattr(
-                self,
-                OUTPUT_DISCARDED,
-                outputSetDiscarded,
-            )
+            canonicalDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
             persistedDiscardedCandidates = {
                 imageId
                 for imageId in rejectedCandidateIds
@@ -813,36 +696,20 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             acceptedIds.update(persistedAcceptedCandidates)
             discardedIds.update(persistedDiscardedCandidates)
             persistedDoneIds = acceptedIds.union(discardedIds)
-            self._persistedDoneIdsCache = (
-                set(persistedDoneIds),
-                acceptedIds,
-                discardedIds,
-            )
+            self._persistedDoneIdsCache = (set(persistedDoneIds), acceptedIds, discardedIds)
 
         # processedIds is a queue of results still needing publication, not
         # an execution history. Remove only ids whose durable output
         # registration has been confirmed. Keep unpersisted ids queued for
         # replay and preserve any results appended concurrently by workers.
         with resultsLock:
-            self.processedIds = [
-                imageId
-                for imageId in self.processedIds
-                if imageId not in persistedDoneIds
-            ]
+            self.processedIds = [imageId for imageId in self.processedIds if imageId not in persistedDoneIds]
 
             insertedIds = getattr(self, 'insertedIds', None)
             if insertedIds is not None:
-                self.insertedIds = [
-                    imageId
-                    for imageId in insertedIds
-                    if imageId not in persistedDoneIds
-                ]
+                self.insertedIds = [imageId for imageId in insertedIds if imageId not in persistedDoneIds]
 
-            batchOwnership = getattr(
-                self,
-                '_scheduledInputBatchById',
-                None,
-            )
+            batchOwnership = getattr(self, '_scheduledInputBatchById', None)
             if batchOwnership is not None:
                 for imageId in persistedDoneIds:
                     batchOwnership.pop(imageId, None)
@@ -851,16 +718,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # must be replayed. Unclassified results are intentionally consumed:
         # their ids were released above so MIFFI can process them again from
         # scratch instead of replaying the same unusable result files.
-        pendingIds = (
-            set(newDone)
-            .difference(persistedDoneIds)
-            .difference(unclassifiedIds)
-        )
+        pendingIds = set(newDone).difference(persistedDoneIds).difference(unclassifiedIds)
 
-        self.finished = (
-            self.isStreamClosed
-            and set(persistedDoneIds) == inputIds
-        )
+        self.finished = self.isStreamClosed and set(persistedDoneIds) == inputIds
 
         if pendingIds:
             requeuePendingResults()
@@ -872,12 +732,24 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         for v in all_labels.values():
             counter[v['label']] += 1
 
+        labelCounts = getattr(self, 'labelCounts', None)
+        if labelCounts is None:
+            # Lightweight harnesses and in-process legacy state may still
+            # expose labelHistory. Migrate its counts once, then clear it so
+            # it cannot keep growing with the number of processed images.
+            labelCounts = Counter({label: len(items) for label, items in getattr(self, 'labelHistory', {}).items()})
+            self.labelCounts = labelCounts
+
         for label, count in counter.items():
-            self.labelHistory[label].extend([None] * count)  # Just used for counting
+            labelCounts[label] += count
+
+        labelHistory = getattr(self, 'labelHistory', None)
+        if labelHistory is not None:
+            labelHistory.clear()
 
         now = datetime.now()
-        total_accepted = sum(len(v) for k, v in self.labelHistory.items() if k in self.acceptedLabels)
-        total_rejected = sum(len(v) for k, v in self.labelHistory.items() if k in self.rejectedLabels)
+        total_accepted = sum(count for label, count in labelCounts.items() if label in self.acceptedLabels)
+        total_rejected = sum(count for label, count in labelCounts.items() if label in self.rejectedLabels)
         self.timeHistory.append((now, total_accepted, total_rejected))
 
         # === NEW: Call plotting functions ===
@@ -928,8 +800,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             batchIds = newIds[i:i + batchSize]
             if len(batchIds) == batchSize or self.isStreamClosed:
                 batchNumber = self.counterBatch
-                stepId = self._insertFunctionStep(self.miffStep, batchIds, batchNumber, needsGPU=True,
-                                              prerequisites=[])
+                stepId = self._insertFunctionStep(self.miffStep, batchIds, batchNumber, needsGPU=True, prerequisites=[])
                 for imageId in batchIds:
                     batchOwnership[imageId] = batchNumber
                 self.counterBatch += 1
@@ -950,32 +821,18 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 resultsLock = self._resultsLock
 
             with resultsLock:
-                batchOwnership = getattr(
-                    self,
-                    '_scheduledInputBatchById',
-                    None,
-                )
+                batchOwnership = getattr(self, '_scheduledInputBatchById', None)
 
                 if batchOwnership is None:
                     # Backwards-compatible path for lightweight harnesses.
                     releasableMissingIds = set(missingIds)
                 else:
-                    releasableMissingIds = {
-                        imageId
-                        for imageId in missingIds
-                        if batchOwnership.get(imageId) == counterBatch
-                    }
+                    releasableMissingIds = {imageId for imageId in missingIds
+                                             if batchOwnership.get(imageId) == counterBatch}
 
-                self.insertedIds = [
-                    imageId for imageId in self.insertedIds
-                    if imageId not in releasableMissingIds
-                ]
+                self.insertedIds = [imageId for imageId in self.insertedIds if imageId not in releasableMissingIds]
 
-                pendingInputIds = getattr(
-                    self,
-                    '_pendingInputIds',
-                    None,
-                )
+                pendingInputIds = getattr(self, '_pendingInputIds', None)
                 if pendingInputIds is not None:
                     pendingInputIds.update(releasableMissingIds)
 
@@ -988,9 +845,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 return
 
             inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
-            categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(
-                counterBatch, inference_output_file
-            )
+            categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(counterBatch, inference_output_file)
 
             resultsLock = getattr(self, '_lock', None)
             if resultsLock is None:
@@ -1188,8 +1043,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         return self._getExtraPath(TIME_PLOT)
 
     def _plotMiffiLabelHistogram(self):
-        # Compute and sort counts
-        label_counts = {label: len(items) for label, items in self.labelHistory.items()}
+        # labelCounts is bounded by the number of MIFFI categories.
+        label_counts = dict(getattr(self, 'labelCounts', {}))
         sorted_items = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
         labels = [label for label, _ in sorted_items]
         counts = [count for _, count in sorted_items]
