@@ -438,6 +438,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             inputSet = self._loadInputSet(None)
 
         streamMode = Set.STREAM_OPEN
+        acceptedPublished = False
+        rejectedPublished = False
 
         try:
             categorized_micrographs = defaultdict(list)
@@ -508,6 +510,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
 
             if accepted:
                 self._updateOutputSet(OUTPUT, outputSet, streamMode)
+                acceptedPublished = True
                 outputSet = getattr(self, OUTPUT, outputSet)
                 if self.firstTime[OUTPUT]:
                     self._defineSourceRelation(self.inputSet, outputSet)
@@ -516,6 +519,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 self._updateOutputSet(
                     OUTPUT_DISCARDED, outputSetDiscarded, streamMode
                 )
+                rejectedPublished = True
                 outputSetDiscarded = getattr(
                     self, OUTPUT_DISCARDED, outputSetDiscarded
                 )
@@ -525,6 +529,55 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                     )
                     self.firstTime[OUTPUT_DISCARDED] = False
         except Exception:
+            # One logical output may already have been committed before a
+            # later output/update step fails. Preserve that durable progress
+            # incrementally instead of replaying already-persisted ids.
+            persistedAcceptedBeforeFailure = set()
+            if acceptedPublished:
+                canonicalAccepted = getattr(self, OUTPUT, outputSet)
+                persistedAcceptedBeforeFailure = {
+                    imageId for imageId in acceptedCandidateIds
+                    if imageId in canonicalAccepted
+                }
+
+            persistedDiscardedBeforeFailure = set()
+            if rejectedPublished:
+                canonicalDiscarded = getattr(
+                    self,
+                    OUTPUT_DISCARDED,
+                    outputSetDiscarded,
+                )
+                persistedDiscardedBeforeFailure = {
+                    imageId for imageId in rejectedCandidateIds
+                    if imageId in canonicalDiscarded
+                }
+
+            persistedBeforeFailure = (
+                persistedAcceptedBeforeFailure
+                | persistedDiscardedBeforeFailure
+            )
+
+            if persistedBeforeFailure:
+                cache = getattr(self, '_persistedDoneIdsCache', None)
+                if cache is not None:
+                    _, acceptedIds, discardedIds = cache
+                    acceptedIds = set(acceptedIds)
+                    discardedIds = set(discardedIds)
+                    acceptedIds.update(persistedAcceptedBeforeFailure)
+                    discardedIds.update(persistedDiscardedBeforeFailure)
+                    self._persistedDoneIdsCache = (
+                        acceptedIds.union(discardedIds),
+                        acceptedIds,
+                        discardedIds,
+                    )
+
+                with resultsLock:
+                    self.processedIds = [
+                        imageId
+                        for imageId in self.processedIds
+                        if imageId not in persistedBeforeFailure
+                    ]
+
             requeuePendingResults()
             raise
 
