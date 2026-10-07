@@ -1118,6 +1118,66 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
         )
         self.assertEqual(1, protocol.storeCalls)
 
+    def testClosedStreamReconcilesPersistedOutputsBeforeCompletion(self):
+        import threading
+
+        class _Output:
+            def __init__(self):
+                self.getIdSetCalls = 0
+
+            def loadAllProperties(self):
+                pass
+
+            def getIdSet(self):
+                self.getIdSetCalls += 1
+                return {1}
+
+        class _Input:
+            def getIdSet(self):
+                return {1}
+
+        class _Harness:
+            def __init__(self):
+                self._resultsLock = threading.Lock()
+                self.outputMicrographs = _Output()
+                self._persistedDoneIdsCache = (set(), set(), set())
+                self.processedIds = []
+                self.outputCategorizeFiles = []
+                self.outputCategorizeLogFiles = []
+                self.isStreamClosed = True
+                self.inputFn = "logical-input"
+                self.finished = False
+                self.storeCalls = 0
+
+            def _getAllDoneIds(self):
+                return MiffiProtMicrographs._getAllDoneIds(self)
+
+            def _loadInputSet(self, _inputFn):
+                return _Input()
+
+            def _store(self):
+                self.storeCalls += 1
+
+        protocol = _Harness()
+
+        MiffiProtMicrographs._checkNewOutput(protocol)
+
+        self.assertEqual(
+            1,
+            protocol.outputMicrographs.getIdSetCalls,
+            "A closed MIFFI stream must reconcile persisted output ids "
+            "instead of trusting a possibly stale in-memory cache.",
+        )
+        self.assertTrue(
+            protocol.finished,
+            "Terminal completion must use the reconciled durable output ids.",
+        )
+        self.assertEqual(
+            {1},
+            protocol._persistedDoneIdsCache[0],
+        )
+        self.assertEqual(1, protocol.storeCalls)
+
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
         import os
         import pickle

@@ -195,6 +195,7 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
         self._inputWatermark = 0
         self._pendingInputIds = set()
+        self._closedOutputReconciled = False
         self.processedIds = [] # Ids to be register to output
         self.outputCategorizeFiles = []
         self.outputCategorizeLogFiles = []
@@ -373,7 +374,20 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 self.updateSteps()
 
     def _checkNewOutput(self):
+        # The persisted-output cache is transient process state. Once the
+        # input stream closes, rebuild it exactly once from durable outputs
+        # so Resume/recovery cannot make terminal completion depend on a
+        # stale in-memory snapshot. Subsequent closed polls stay incremental.
+        if (
+            self.isStreamClosed
+            and not getattr(self, '_closedOutputReconciled', False)
+        ):
+            self._persistedDoneIdsCache = None
+
         doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
+
+        if self.isStreamClosed:
+            self._closedOutputReconciled = True
 
         # miffStep runs in parallel with _stepsCheck. Snapshot the ids and
         # their result files atomically, otherwise a worker can publish a
