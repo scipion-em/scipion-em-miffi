@@ -729,6 +729,15 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                         if imageId not in persistedBeforeFailure
                     ]
 
+                    batchOwnership = getattr(
+                        self,
+                        '_scheduledInputBatchById',
+                        None,
+                    )
+                    if batchOwnership is not None:
+                        for imageId in persistedBeforeFailure:
+                            batchOwnership.pop(imageId, None)
+
             requeuePendingResults()
             raise
 

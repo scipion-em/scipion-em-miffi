@@ -1156,6 +1156,7 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
+                    self._scheduledInputBatchById = {1: 4}
                     self.outputCategorizeFiles = [pklFile]
                     self.outputCategorizeLogFiles = [logFile]
                     self.isStreamClosed = False
@@ -1214,6 +1215,13 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                 protocol.processedIds,
                 "A candidate confirmed durable after an ambiguous output "
                 "failure must leave the pending publication queue.",
+            )
+
+            self.assertEqual(
+                {},
+                protocol._scheduledInputBatchById,
+                "A candidate confirmed durable during ambiguous-output "
+                "recovery must also release its transient batch ownership.",
             )
 
 
