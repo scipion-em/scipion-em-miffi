@@ -473,7 +473,13 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             self.finished = False
 
         if not newDone:
-            self._retryPendingSourceRelations()
+            try:
+                self._retryPendingSourceRelations()
+            except Exception:
+                requeuePendingResults()
+                raise
+            if outputCategorizeFiles or outputCategorizeLogFiles:
+                MiffiProtMicrographs._cleanupConsumedResultBatches(self, outputCategorizeFiles + outputCategorizeLogFiles)
             self._store()
             return
 
@@ -762,7 +768,22 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         self.summaryVar.set(dict_str)
         self.outputLog  = outputLogTmp
 
+        if not pendingIds:
+            MiffiProtMicrographs._cleanupConsumedResultBatches(self, outputCategorizeFiles + outputCategorizeLogFiles)
+
         self._store()
+
+    def _cleanupConsumedResultBatches(self, resultFiles):
+        extraRoot = os.path.abspath(self._getExtraPath()) if hasattr(self, '_getExtraPath') else None
+        batchDirs = {os.path.dirname(path) for path in resultFiles if path}
+        for batchDir in batchDirs:
+            batchDir = os.path.abspath(batchDir)
+            if not re.fullmatch(r'micBatch\d+', os.path.basename(batchDir)):
+                continue
+            if extraRoot is not None and os.path.commonpath([batchDir, extraRoot]) != extraRoot:
+                continue
+            if os.path.isdir(batchDir):
+                shutil.rmtree(batchDir)
 
     def _loadInputSet(self, _unusedInputIdentity=None):
         self.debug("Reloading logical input Set.")

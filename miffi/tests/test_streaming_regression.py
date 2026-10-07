@@ -1466,8 +1466,10 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
         from collections import defaultdict
 
         with tempfile.TemporaryDirectory() as tmp:
-            pklFile = os.path.join(tmp, "batch_dict.pkl")
-            logFile = os.path.join(tmp, "batch.log")
+            batchDir = os.path.join(tmp, "micBatch7")
+            os.makedirs(batchDir)
+            pklFile = os.path.join(batchDir, "batch_dict.pkl")
+            logFile = os.path.join(batchDir, "batch.log")
 
             with open(pklFile, "wb") as handle:
                 pickle.dump(
@@ -1580,6 +1582,11 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
             )
             self.assertEqual(1, protocol.outputUpdateCalls)
             self.assertEqual(1, protocol.relationCalls)
+            self.assertTrue(
+                os.path.isdir(batchDir),
+                "A MIFFI result batch must survive while its source relation "
+                "still needs retry.",
+            )
 
             MiffiProtMicrographs._checkNewOutput(protocol)
 
@@ -1594,6 +1601,13 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
                 protocol.relationCalls,
                 "A source relation that failed before being inserted must be "
                 "retried even when there are no new output candidates.",
+            )
+
+            self.assertFalse(
+                os.path.exists(batchDir),
+                "Once the durable output's pending source relation is "
+                "successfully repaired, its consumed MIFFI extra batch "
+                "must be removed instead of leaking on disk.",
             )
 
 
@@ -2001,8 +2015,10 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
         from collections import defaultdict
 
         with tempfile.TemporaryDirectory() as tmp:
-            pklFile = os.path.join(tmp, "batch_dict.pkl")
-            logFile = os.path.join(tmp, "batch.log")
+            batchDir = os.path.join(tmp, "micBatch7")
+            os.makedirs(batchDir)
+            pklFile = os.path.join(batchDir, "batch_dict.pkl")
+            logFile = os.path.join(batchDir, "batch.log")
 
             with open(pklFile, "wb") as handle:
                 pickle.dump(
@@ -2091,6 +2107,9 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 def _plotMiffiTimeEvolution(self):
                     pass
 
+                def _cleanupConsumedResultBatches(self, resultFiles):
+                    return MiffiProtMicrographs._cleanupConsumedResultBatches(self, resultFiles)
+
                 def _store(self):
                     pass
 
@@ -2144,6 +2163,13 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 sum(len(items) for items in protocol.labelHistory.values()),
                 "Legacy labelHistory must not grow with the number of "
                 "processed micrographs.",
+            )
+
+            self.assertFalse(
+                os.path.exists(batchDir),
+                "Once every result from a MIFFI extra batch is durably consumed, "
+                "its extra/micBatchN workspace must be removed instead of "
+                "accumulating for the lifetime of the stream.",
             )
 
     def testPublishedBatchVerifiesOnlyCandidateOutputIds(self):
