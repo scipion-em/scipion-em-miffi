@@ -39,13 +39,14 @@ import re
 from collections import defaultdict, Counter
 import matplotlib.pyplot as plt
 
-from pyworkflow.protocol import STEPS_PARALLEL
+from pyworkflow.protocol import STEPS_PARALLEL, ProtStreamingBase
+from pyworkflow.object import RELATION_SOURCE
 import pyworkflow.protocol.params as params
 from pyworkflow.utils import prettyTime, Message
-from pyworkflow.utils.path import makePath, copyFile, copyTree
+from pyworkflow.utils.path import makePath, copyFile, copyTree, cleanPath
 from pwem.objects import SetOfMicrographs, Set, String
-from pwem.protocols import EMProtocol, ProtPreprocessMicrographs
-from pyworkflow.protocol.constants import STATUS_NEW, LEVEL_ADVANCED
+from pwem.protocols import ProtPreprocessMicrographs
+from pyworkflow.protocol.constants import LEVEL_ADVANCED
 from pyworkflow import BETA, UPDATED, NEW, PROD
 
 from .. import Plugin, MIFFI_MODELS
@@ -67,7 +68,13 @@ CATEGORIES = [GOOD, BAD_SINGLE, BAD_FILM, BAD_DRIFT, BAD_MINOR_CRYSTALLINE, BAD_
 HISTROGRAM_PLOT = 'miffi_label_histogram.png'
 TIME_PLOT = 'miffi_label_time_evolution.png'
 
-class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
+
+def _getBatchMicName(micId, micName):
+    # Return the collision-safe filename used inside a MIFFI batch.
+    return '%s__%s' % (micId, os.path.basename(micName))
+
+
+class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
     """
     Protocol to categorize micrographs based on the image and the FT. It calls miffis inference and categorize programs.
     """
@@ -78,6 +85,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     LABELS = 0
     THRESHOLD = 1
+
+    MIC_VISIBILITY_MAX_ATTEMPTS = 3
+    MIC_VISIBILITY_RETRY_DELAY = 1  # seconds
 
     def __init__(self, **kwargs):
         ProtPreprocessMicrographs.__init__(self, **kwargs)
@@ -143,27 +153,61 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
                            'This label is binary and describes whether the micrograph is rejected \n'
                            'based of more than one criteria.')
 
-        form.addParallelSection(threads=1)
+        form.addParallelSection(threads=3)
 
         self._defineStreamingParams(form)
         form.getParam('streamingBatchSize').setDefault(5)
         form.getParam('streamingSleepOnWait').setDefault(5)
 
     # --------------------------- STEPS functions ------------------------------
-    def _insertAllSteps(self):
+    def stepsGeneratorStep(self):
+        """Discover, categorize and publish micrographs incrementally."""
+        self.newDeps = []
         self.initializeParams()
+
+        while not self.finished:
+            if self.isFailed():
+                return
+
+            self._checkNewInput()
+            if self.isFailed():
+                return
+
+            self._checkNewOutput()
+            if self.isFailed():
+                return
+
+            if self.finished:
+                break
+
+            sleepOnWait = self._getStreamingSleepOnWait()
+            if sleepOnWait > 0:
+                self._streamingSleepOnWait()
+            else:
+                # A generator must yield CPU while waiting for new input
+                # or for in-flight batches to complete.
+                time.sleep(1)
+
         self._insertFunctionStep(self.createOutputStep,
-                                 prerequisites=[], wait=True, needsGPU=False)
+                                 prerequisites=self.newDeps, needsGPU=False)
 
     def createOutputStep(self):
         self._closeOutputSet()
 
     def initializeParams(self):
         self.finished = False
-        self.firstTime = {OUTPUT: True,
-                          OUTPUT_DISCARDED: True}
+        # Source relations belong to the logical outputs and survive Resume.
+        # Only outputs that do not exist yet need their relation defined on
+        # first publication in this execution.
+        self.firstTime = {OUTPUT: self._outputNeedsSourceRelation(OUTPUT),
+                          OUTPUT_DISCARDED: self._outputNeedsSourceRelation(OUTPUT_DISCARDED)}
         # Important to have both:
         self.insertedIds = []   # Contains images that have been inserted in a Step (checkNewInput).
+        self._scheduledInputBatchById = {}
+        self._inputWatermark = 0
+        self._pendingInputIds = set()
+        self._closedOutputReconciled = False
+        self._closedInputIdsCache = None
         self.processedIds = [] # Ids to be register to output
         self.outputCategorizeFiles = []
         self.outputCategorizeLogFiles = []
@@ -171,14 +215,73 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.outputLog = {}
         self.counterBatch = 1
         self.isStreamClosed = self.inputSet.get().isStreamClosed()
-        # Plot variables
+        # Plot variables. Keep cumulative label counts bounded by the
+        # number of categories instead of one placeholder per micrograph.
+        self.labelCounts = Counter()
         self.labelHistory = defaultdict(list)
         self.timeHistory = []
-        # Contains images that have been processed in a Step (checkNewOutput).
-        self.inputFn = self.inputSet.get().getFileName()
-        self._inputClass = self.inputSet.get().getClass()
-        self._inputType = self.inputSet.get().getClassName().split('SetOf')[1]
-        self._baseName = '%s.sqlite' % self._inputType.lower()
+        # The input Pointer/Set is the logical identity. Do not persist or
+        # reconstruct streaming state from a physical Set backing filename.
+
+    def _outputNeedsSourceRelation(self, outputName):
+        # Return whether outputName still needs its datasource relation.
+        outputSet = getattr(self, outputName, None)
+        if outputSet is None:
+            return True
+
+        getRelations = getattr(self, 'getRelations', None)
+        if not callable(getRelations):
+            # Lightweight harnesses cannot inspect persisted relations.
+            # Preserve the previous safe assumption for an existing output.
+            return False
+
+        outputGetObjId = getattr(outputSet, 'getObjId', None)
+        inputObject = self.inputSet.get()
+        inputGetObjId = getattr(inputObject, 'getObjId', None)
+
+        if not callable(outputGetObjId) or not callable(inputGetObjId):
+            return False
+
+        outputId = outputGetObjId()
+        inputId = inputGetObjId()
+
+        if outputId is None or inputId is None:
+            return False
+
+        for relation in getRelations():
+            try:
+                isSource = relation['name'] == RELATION_SOURCE
+                sameParent = relation['object_parent_id'] == inputId
+                sameChild = relation['object_child_id'] == outputId
+            except (KeyError, TypeError):
+                continue
+
+            if isSource and sameParent and sameChild:
+                return False
+
+        return True
+
+    def _retryPendingSourceRelations(self):
+        # Retry relations whose output persisted before relation creation.
+        # First reconcile against durable relation state: a previous call may
+        # have committed the relation and then failed before returning.
+        relationChecker = getattr(self, '_outputNeedsSourceRelation', None)
+
+        for outputName in (OUTPUT, OUTPUT_DISCARDED):
+            if not self.firstTime.get(outputName, False):
+                continue
+
+            outputSet = getattr(self, outputName, None)
+            if outputSet is None:
+                continue
+
+            if callable(relationChecker):
+                if not relationChecker(outputName):
+                    self.firstTime[outputName] = False
+                    continue
+
+            self._defineSourceRelation(self.inputSet, outputSet)
+            self.firstTime[outputName] = False
 
     def _getDefinedLabels(self):
         categories = {
@@ -224,139 +327,469 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
         return accepted_labels, rejected_labels
 
-    def _getFirstJoinStepName(self):
-        # This function will be used for streaming, to check which is
-        # the first function that need to wait for all ctfs
-        # to have completed, this can be overriden in subclasses
-        # (e.g., in Xmipp 'sortPSDStep')
-        return 'createOutputStep'
+    # How many polls a closed producer may keep showing exactly the same
+    # incomplete view before the protocol gives up on it.
+    TERMINAL_STALL_POLLS = 10
 
-    def _getFirstJoinStep(self):
-        for s in self._steps:
-            if s.funcName == self._getFirstJoinStepName():
-                return s
-        return None
+    def _hasActiveStreamingWork(self):
+        """Whether something is still in flight for this protocol.
 
-    def _stepsCheck(self):
-        self._checkNewInput()
-        self._checkNewOutput()
+        Work in flight is progress, however long it takes, so it must
+        never be counted towards a terminal stall. A protocol that does
+        not know how to answer this says so by returning True, which
+        simply means the stall detector stays out of its way.
+        """
+        return bool(getattr(self, 'insertedIds', None))
+
+    def _recordTerminalProgress(self, inputSet, knownIds, terminalConsistent):
+        """Refuse to poll forever for rows that are never coming.
+
+        A producer can close declaring more items than the consumer can
+        see, and usually the rest turn up a moment later. When they do
+        not - the declared size, what is known and the watermark all stay
+        exactly as they were, poll after poll, with nothing in flight -
+        the protocol would otherwise sit there RUNNING for the rest of
+        time, rescanning the whole input on every one of those polls.
+        """
+        if terminalConsistent:
+            self._terminalStallSignature = None
+            self._terminalStallCount = 0
+
+            return
+
+        if self._hasActiveStreamingWork():
+            self._terminalStallCount = 0
+
+            return
+
+        signature = (inputSet.getSize(), len(knownIds),
+                     getattr(self, '_inputWatermark', 0))
+
+        if signature == getattr(self, '_terminalStallSignature', None):
+            self._terminalStallCount = getattr(
+                self, '_terminalStallCount', 0) + 1
+        else:
+            self._terminalStallSignature = signature
+            self._terminalStallCount = 1
+
+        if self._terminalStallCount >= self.TERMINAL_STALL_POLLS:
+            raise RuntimeError(
+                "The input stream closed declaring %d items but only %d "
+                "are visible, and that has not changed in %d polls with "
+                "nothing left to process. Refusing to wait for rows that "
+                "are not coming."
+                % (inputSet.getSize(), len(knownIds),
+                   self._terminalStallCount))
 
     def _checkNewInput(self):
-        # Check if there are new images to process from the input set
+        # Discover only input ids above the logical streaming watermark.
+        # Items discovered but not scheduled yet remain pending across polls.
         self.lastCheck = getattr(self, 'lastCheck', datetime.now())
-        mTime = datetime.fromtimestamp(os.path.getmtime(self.inputFn))
-        self.debug('Last check: %s, modification: %s'
-                    % (prettyTime(self.lastCheck),
-                       prettyTime(mTime)))
-        # If the input.sqlite have not changed since our last check,
-        # it does not make sense to check for new input data
-        if self.lastCheck > mTime and self.insertedIds:  # If this is empty it is dut to a static "continue" action or it is the first round
-            return None
+        self.debug('Last check: %s' % prettyTime(self.lastCheck))
 
-        inputSet = self._loadInputSet(self.inputFn)
-        inputSetIds = inputSet.getIdSet()
-        newIds = [idImage for idImage in inputSetIds if idImage not in self.insertedIds]
+        inputSet = self._loadInputSet(None)
+        watermark = getattr(self, '_inputWatermark', 0)
+        pendingIds = getattr(self, '_pendingInputIds', None)
+        if pendingIds is None:
+            pendingIds = set()
+            self._pendingInputIds = pendingIds
+
+        try:
+            discoveredIds = list(inputSet.getUniqueValues('id', where='id > %d' % watermark))
+        except (AttributeError, NotImplementedError):
+            # Compatibility fallback for Set-like implementations that do
+            # not support filtered unique values. Native Scipion Set mappers
+            # use the incremental query above.
+            getUniqueValues = getattr(inputSet, 'getUniqueValues', None)
+            if callable(getUniqueValues):
+                discoveredIds = [itemId for itemId in getUniqueValues('id') if itemId > watermark]
+            else:
+                discoveredIds = [itemId for itemId in inputSet.getIdSet() if itemId > watermark]
+
+        discoveredIds = sorted(discoveredIds)
+        if discoveredIds:
+            self._inputWatermark = max(watermark, max(discoveredIds))
+            pendingIds.update(discoveredIds)
+
+        self.isStreamClosed = inputSet.isStreamClosed()
+
+        # A producer can close after an id below the watermark becomes
+        # visible (for example id 10 was seen before id 9). insertedIds now
+        # contains only active work, so durable outputs provide the historical
+        # completed state during terminal reconciliation.
+        if self.isStreamClosed:
+            expectedSize = inputSet.getSize()
+            doneIds, _, _, _ = self._getAllDoneIds()
+            durableDoneIds = set(doneIds)
+            pendingIds.difference_update(durableDoneIds)
+
+            reconciledIds = getattr(self, '_closedInputIdsCache', None)
+            if reconciledIds is None:
+                try:
+                    reconciledIds = list(inputSet.getUniqueValues('id'))
+                except (AttributeError, NotImplementedError):
+                    reconciledIds = list(inputSet.getIdSet())
+
+                if reconciledIds:
+                    self._inputWatermark = max(self._inputWatermark, max(reconciledIds))
+
+                if len(reconciledIds) == expectedSize:
+                    self._closedInputIdsCache = set(reconciledIds)
+
+            pendingIds.update(imageId for imageId in reconciledIds
+                              if imageId not in self.insertedIds and imageId not in durableDoneIds)
+
+            knownIds = set(reconciledIds)
+            knownIds.update(self.insertedIds)
+            knownIds.update(durableDoneIds)
+            self._recordTerminalProgress(inputSet, knownIds,
+                                         len(knownIds) >= expectedSize)
 
         self.lastCheck = datetime.now()
-        self.isStreamClosed = inputSet.isStreamClosed()
         inputSet.close()
 
-        outputStep = self._getFirstJoinStep()
-
-        if self.isContinued() and not self.insertedIds:  # For "Continue" action and the first round
+        if self.isContinued() and not self.insertedIds:
             doneIds, _, _, _ = self._getAllDoneIds()
-            skipIds = list(set(newIds).intersection(set(doneIds)))
-            newIds = list(set(newIds).difference(set(doneIds)))
-            self.info("Skipping Images with ID: %s, seems to be done" % skipIds)
-            self.insertedIds = doneIds  # During the first round of "Continue" action it has to be filled
+            doneIds = set(doneIds)
+            skipIds = sorted(pendingIds.intersection(doneIds))
+            if skipIds:
+                self.info("Skipping Images with ID: %s, seems to be done" % skipIds)
+            pendingIds.difference_update(doneIds)
 
-        # Now handle the steps depending on the streaming batch size
+        newIds = sorted(imageId for imageId in pendingIds if imageId not in self.insertedIds)
+
+        # Now handle the steps depending on the streaming batch size.
         streamingBatchSize = self.streamingBatchSize.get()
         if len(newIds) < streamingBatchSize and not self.isStreamClosed:
-            return  # No register any step if the batch size is not reach unless is the lass iter
+            return
 
         if newIds:
             streamingBatchSize = len(newIds) if streamingBatchSize == 0 else streamingBatchSize
+
+            insertedBefore = set(self.insertedIds)
             fDeps = self._insertNewImageSteps(newIds, streamingBatchSize)
-            if outputStep is not None:
-                outputStep.addPrerequisites(*fDeps)
-            self.updateSteps()
+            scheduledIds = set(self.insertedIds).difference(insertedBefore)
+            pendingIds.difference_update(scheduledIds)
+
+            self.newDeps.extend(fDeps)
+            if fDeps:
+                self.updateSteps()
 
     def _checkNewOutput(self):
-        doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
-        processedIds = copy.deepcopy(self.processedIds)
-        newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
-        allDone = len(doneListIds) + len(newDone)
-        maxSize = self._loadInputSet(self.inputFn).getSize()
-        # We have finished when there is not more input images
-        # (stream closed) or when the limit of output size is met
-        self.finished = self.isStreamClosed and allDone == maxSize
-        streamMode = Set.STREAM_CLOSED if self.finished else Set.STREAM_OPEN
+        # The persisted-output cache is transient process state. Once the
+        # input stream closes, rebuild it exactly once from durable outputs
+        # so Resume/recovery cannot make terminal completion depend on a
+        # stale in-memory snapshot. Subsequent closed polls stay incremental.
+        if self.isStreamClosed and not getattr(self, '_closedOutputReconciled', False):
+            self._persistedDoneIdsCache = None
 
-        if not self.finished and not newDone:
-            # If we are not finished and no new output have been produced
-            # it does not make sense to proceed and updated the outputs
-            # so we exit from the function here
+        doneListIds, currentOutputSize, _, _ = self._getAllDoneIds()
+
+        if self.isStreamClosed:
+            self._closedOutputReconciled = True
+
+        # miffStep runs in parallel with _stepsCheck. Snapshot the ids and
+        # their result files atomically, otherwise a worker can publish a
+        # result between deepcopy() and the queue reset and lose that result.
+        resultsLock = getattr(self, '_lock', None)
+        if resultsLock is None:
+            # Lightweight regression harnesses do not instantiate Protocol.
+            resultsLock = self._resultsLock
+
+        with resultsLock:
+            processedIds = copy.deepcopy(self.processedIds)
+            outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
+            outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
+            self.outputCategorizeFiles = []
+            self.outputCategorizeLogFiles = []
+
+        def requeuePendingResults():
+            with resultsLock:
+                self.outputCategorizeFiles = outputCategorizeFiles + self.outputCategorizeFiles
+                self.outputCategorizeLogFiles = outputCategorizeLogFiles + self.outputCategorizeLogFiles
+
+        newDone = [imageId for imageId in processedIds if imageId not in doneListIds]
+
+        # Exact input-id equality is only needed to decide terminal
+        # completion. Keep normal open-stream output polls off the O(N)
+        # input-id scan hot path.
+        inputSet = None
+        inputIds = None
+
+        if self.isStreamClosed:
+            inputSet = self._loadInputSet(None)
+            inputIds = getattr(self, '_closedInputIdsCache', None)
+
+            if inputIds is None:
+                inputIds = set(inputSet.getIdSet())
+
+                # A closed PostgreSQL-backed Set may still be catching up
+                # visibility. Cache only a complete terminal snapshot.
+                if len(inputIds) == inputSet.getSize():
+                    self._closedInputIdsCache = set(inputIds)
+
+            self.finished = set(doneListIds) == inputIds
+        else:
+            self.finished = False
+
+        if not newDone:
+            try:
+                self._retryPendingSourceRelations()
+            except Exception:
+                requeuePendingResults()
+                raise
+            if outputCategorizeFiles or outputCategorizeLogFiles:
+                MiffiProtMicrographs._cleanupConsumedResultBatches(self, outputCategorizeFiles + outputCategorizeLogFiles)
+            self._store()
             return
 
-        outputCategorizeFiles = copy.deepcopy(self.outputCategorizeFiles)
-        outputCategorizeLogFiles = copy.deepcopy(self.outputCategorizeLogFiles)
-        self.outputCategorizeFiles = []  # These mics are already registered
-        self.outputCategorizeLogFiles = []
-        inputSet = self._loadInputSet(self.inputFn)
+        # Publishing new results still needs the input objects themselves,
+        # but an open stream does not need to enumerate every input id.
+        if inputSet is None:
+            inputSet = self._loadInputSet(None)
 
-        categorized_micrographs = defaultdict(list)
-        accepted = {}
-        rejected = {}
+        streamMode = Set.STREAM_OPEN
+        acceptedPublished = False
+        rejectedPublished = False
+        publishingOutputName = None
 
-        for pkl_files in outputCategorizeFiles:
-            with open(pkl_files, 'rb') as file:
-                data = pickle.load(file)
-                for category in CATEGORIES:
-                    if category in data:
-                        for path in data[category]:
-                            mic_name = Path(path).name
-                            categorized_micrographs[mic_name].append(category)
+        try:
+            categorized_micrographs = defaultdict(list)
+            accepted = {}
+            rejected = {}
 
-        for mic_name, labels in categorized_micrographs.items():
-            matching_accept = [l for l in labels if l in self.acceptedLabels]
-            matching_reject = [l for l in labels if l in self.rejectedLabels]
+            for pkl_files in outputCategorizeFiles:
+                with open(pkl_files, 'rb') as file:
+                    data = pickle.load(file)
+                    for category in CATEGORIES:
+                        if category in data:
+                            for path in data[category]:
+                                mic_name = Path(path).name
+                                categorized_micrographs[mic_name].append(category)
 
-            if matching_accept:
-                # Pick first accepted label, keep original meaning
-                accepted[mic_name] = {'label': matching_accept[0]}
-            elif matching_reject:
-                rejected[mic_name] = {'label': matching_reject[0]}
+            for mic_name, labels in categorized_micrographs.items():
+                matching_accept = [l for l in labels if l in self.acceptedLabels]
+                matching_reject = [l for l in labels if l in self.rejectedLabels]
 
-        # Load output sets
-        if accepted:
-            outputSet = self._loadOutputSet(self._inputClass, self._baseName)
-        if rejected:
-            outputSetDiscarded = self._loadOutputSet(self._inputClass, 'micrographDISCARDED.sqlite')
+                if matching_accept:
+                    # Pick first accepted label, keep original meaning
+                    accepted[mic_name] = {'label': matching_accept[0]}
+                elif matching_reject:
+                    rejected[mic_name] = {'label': matching_reject[0]}
 
-        # Assign micrographs to their sets with attributes
-        for imageId in newDone:
-            image = inputSet.getItem("id", imageId).clone()
-            micName = os.path.basename(image.getFileName())
+            # Load output sets
+            if accepted:
+                outputSet = self._loadOutputSet(OUTPUT)
+            if rejected:
+                outputSetDiscarded = self._loadOutputSet(OUTPUT_DISCARDED, suffix="_discarded")
 
-            if micName in accepted:
-                setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
-                outputSet.append(image)
+            # Assign micrographs to their sets with attributes.
+            # Keep track of processed ids for which this result snapshot
+            # contains no recognized MIFFI category. Those ids must be
+            # released for a fresh processing attempt instead of replaying
+            # the same result files forever.
+            unclassifiedIds = set()
+            acceptedCandidateIds = set()
+            rejectedCandidateIds = set()
 
-            elif micName in rejected:
-                setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
-                outputSetDiscarded.append(image)
+            for imageId in newDone:
+                # Set.getItem raises rather than returning None for a row
+                # it cannot find - check membership first before indexing.
+                if imageId not in inputSet:
+                    self.error(
+                        "Micrograph with id %d is not visible in the input "
+                        "Set; excluding it from the output." % imageId
+                    )
+                    continue
 
-        if accepted:
-            self._updateOutputSet(OUTPUT, outputSet, streamMode)
-            if self.firstTime[OUTPUT]:
-                self._defineSourceRelation(self.inputSet, outputSet)
-                self.firstTime[OUTPUT] = False
-        if rejected:
-            self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
-            if self.firstTime[OUTPUT_DISCARDED]:
-                self._defineSourceRelation(self.inputSet, outputSetDiscarded)
-                self.firstTime[OUTPUT_DISCARDED] = False
+                image = inputSet.getItem("id", imageId).clone()
+                micName = os.path.basename(image.getFileName())
+                batchMicName = _getBatchMicName(imageId, micName)
+
+                if batchMicName in accepted:
+                    setLabel(image, MIFFI_LABEL, accepted[batchMicName]['label'])
+                    outputSet.append(image)
+                    acceptedCandidateIds.add(imageId)
+
+                elif batchMicName in rejected:
+                    setLabel(image, MIFFI_LABEL, rejected[batchMicName]['label'])
+                    outputSetDiscarded.append(image)
+                    rejectedCandidateIds.add(imageId)
+
+                # Compatibility with result files produced before batch
+                # filenames became collision-safe.
+                elif micName in accepted:
+                    setLabel(image, MIFFI_LABEL, accepted[micName]['label'])
+                    outputSet.append(image)
+                    acceptedCandidateIds.add(imageId)
+
+                elif micName in rejected:
+                    setLabel(image, MIFFI_LABEL, rejected[micName]['label'])
+                    outputSetDiscarded.append(image)
+                    rejectedCandidateIds.add(imageId)
+
+                else:
+                    unclassifiedIds.add(imageId)
+
+            # Publish only outputs that actually received still-pending
+            # candidates in this poll. Requeued result files can also contain
+            # ids that were made durable by an earlier partial publication.
+            if acceptedCandidateIds:
+                publishingOutputName = OUTPUT
+                self._updateOutputSet(OUTPUT, outputSet, streamMode)
+                publishingOutputName = None
+                acceptedPublished = True
+                outputSet = getattr(self, OUTPUT, outputSet)
+                if self.firstTime[OUTPUT]:
+                    self._defineSourceRelation(self.inputSet, outputSet)
+                    self.firstTime[OUTPUT] = False
+            if rejectedCandidateIds:
+                publishingOutputName = OUTPUT_DISCARDED
+                self._updateOutputSet(OUTPUT_DISCARDED, outputSetDiscarded, streamMode)
+                publishingOutputName = None
+                rejectedPublished = True
+                outputSetDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
+                if self.firstTime[OUTPUT_DISCARDED]:
+                    self._defineSourceRelation(self.inputSet, outputSetDiscarded)
+                    self.firstTime[OUTPUT_DISCARDED] = False
+        except Exception:
+            # Preserve publications whose _updateOutputSet() call returned
+            # successfully using cheap point lookups. Only a failure that
+            # happened *inside* _updateOutputSet() is an ambiguous commit and
+            # needs a full durable-output reconciliation.
+            persistedAcceptedBeforeFailure = set()
+            if acceptedPublished:
+                canonicalAccepted = getattr(self, OUTPUT, outputSet)
+                persistedAcceptedBeforeFailure = {
+                    imageId for imageId in acceptedCandidateIds
+                    if imageId in canonicalAccepted
+                }
+
+            persistedDiscardedBeforeFailure = set()
+            if rejectedPublished:
+                canonicalDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
+                persistedDiscardedBeforeFailure = {
+                    imageId for imageId in rejectedCandidateIds
+                    if imageId in canonicalDiscarded
+                }
+
+            cacheBeforeRecovery = getattr(self, '_persistedDoneIdsCache', None)
+
+            if publishingOutputName is not None:
+                try:
+                    self._persistedDoneIdsCache = None
+                    _durableDoneIds, _durableSize, durableAcceptedIds, durableDiscardedIds = self._getAllDoneIds()
+
+                    persistedAcceptedBeforeFailure.update(set(acceptedCandidateIds).intersection(durableAcceptedIds))
+                    persistedDiscardedBeforeFailure.update(set(rejectedCandidateIds).intersection(durableDiscardedIds))
+                except Exception:
+                    # Never mask the original publication error. Restore the
+                    # previous cache and keep the ambiguous candidate pending
+                    # if durable reconciliation itself cannot be completed.
+                    self._persistedDoneIdsCache = cacheBeforeRecovery
+
+            persistedBeforeFailure = persistedAcceptedBeforeFailure | persistedDiscardedBeforeFailure
+
+            if persistedBeforeFailure:
+                cache = getattr(self, '_persistedDoneIdsCache', None)
+                if cache is not None:
+                    _, acceptedIds, discardedIds = cache
+                    acceptedIds = set(acceptedIds)
+                    discardedIds = set(discardedIds)
+                    acceptedIds.update(persistedAcceptedBeforeFailure)
+                    discardedIds.update(persistedDiscardedBeforeFailure)
+                    self._persistedDoneIdsCache = (acceptedIds.union(discardedIds), acceptedIds, discardedIds)
+
+                with resultsLock:
+                    self.processedIds = [imageId for imageId in self.processedIds
+                                         if imageId not in persistedBeforeFailure]
+
+                    insertedIds = getattr(self, 'insertedIds', None)
+                    if insertedIds is not None:
+                        self.insertedIds = [imageId for imageId in insertedIds
+                                            if imageId not in persistedBeforeFailure]
+
+                    batchOwnership = getattr(self, '_scheduledInputBatchById', None)
+                    if batchOwnership is not None:
+                        for imageId in persistedBeforeFailure:
+                            batchOwnership.pop(imageId, None)
+
+            requeuePendingResults()
+            raise
+
+        if unclassifiedIds:
+            with resultsLock:
+                self.processedIds = [imageId for imageId in self.processedIds if imageId not in unclassifiedIds]
+
+                insertedIds = getattr(self, "insertedIds", None)
+
+                if insertedIds is not None:
+                    self.insertedIds = [imageId for imageId in insertedIds if imageId not in unclassifiedIds]
+
+                if hasattr(self, '_pendingInputIds'):
+                    self._pendingInputIds.update(unclassifiedIds)
+
+        # Verify only the ids published by this batch. Set.__contains__()
+        # delegates to the backend mapper's point lookup, so this avoids a
+        # complete output scan while still confirming durable registration.
+        persistedAcceptedCandidates = set()
+        if acceptedCandidateIds:
+            canonicalAccepted = getattr(self, OUTPUT, outputSet)
+            persistedAcceptedCandidates = {
+                imageId
+                for imageId in acceptedCandidateIds
+                if imageId in canonicalAccepted
+            }
+
+        persistedDiscardedCandidates = set()
+        if rejectedCandidateIds:
+            canonicalDiscarded = getattr(self, OUTPUT_DISCARDED, outputSetDiscarded)
+            persistedDiscardedCandidates = {
+                imageId
+                for imageId in rejectedCandidateIds
+                if imageId in canonicalDiscarded
+            }
+
+        persistedDoneIds = set(doneListIds)
+        persistedDoneIds.update(persistedAcceptedCandidates)
+        persistedDoneIds.update(persistedDiscardedCandidates)
+
+        cache = getattr(self, '_persistedDoneIdsCache', None)
+        if cache is not None:
+            _, acceptedIds, discardedIds = cache
+            acceptedIds = set(acceptedIds)
+            discardedIds = set(discardedIds)
+            acceptedIds.update(persistedAcceptedCandidates)
+            discardedIds.update(persistedDiscardedCandidates)
+            persistedDoneIds = acceptedIds.union(discardedIds)
+            self._persistedDoneIdsCache = (set(persistedDoneIds), acceptedIds, discardedIds)
+
+        # processedIds is a queue of results still needing publication, not
+        # an execution history. Remove only ids whose durable output
+        # registration has been confirmed. Keep unpersisted ids queued for
+        # replay and preserve any results appended concurrently by workers.
+        with resultsLock:
+            self.processedIds = [imageId for imageId in self.processedIds if imageId not in persistedDoneIds]
+
+            insertedIds = getattr(self, 'insertedIds', None)
+            if insertedIds is not None:
+                self.insertedIds = [imageId for imageId in insertedIds if imageId not in persistedDoneIds]
+
+            batchOwnership = getattr(self, '_scheduledInputBatchById', None)
+            if batchOwnership is not None:
+                for imageId in persistedDoneIds:
+                    batchOwnership.pop(imageId, None)
+
+        # Results that were classified but could not be durably registered
+        # must be replayed. Unclassified results are intentionally consumed:
+        # their ids were released above so MIFFI can process them again from
+        # scratch instead of replaying the same unusable result files.
+        pendingIds = set(newDone).difference(persistedDoneIds).difference(unclassifiedIds)
+
+        self.finished = self.isStreamClosed and set(persistedDoneIds) == inputIds
+
+        if pendingIds:
+            requeuePendingResults()
 
         # === Display the results ===
         all_labels = {**accepted, **rejected}
@@ -365,12 +798,24 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         for v in all_labels.values():
             counter[v['label']] += 1
 
+        labelCounts = getattr(self, 'labelCounts', None)
+        if labelCounts is None:
+            # Lightweight harnesses and in-process legacy state may still
+            # expose labelHistory. Migrate its counts once, then clear it so
+            # it cannot keep growing with the number of processed images.
+            labelCounts = Counter({label: len(items) for label, items in getattr(self, 'labelHistory', {}).items()})
+            self.labelCounts = labelCounts
+
         for label, count in counter.items():
-            self.labelHistory[label].extend([None] * count)  # Just used for counting
+            labelCounts[label] += count
+
+        labelHistory = getattr(self, 'labelHistory', None)
+        if labelHistory is not None:
+            labelHistory.clear()
 
         now = datetime.now()
-        total_accepted = sum(len(v) for k, v in self.labelHistory.items() if k in self.acceptedLabels)
-        total_rejected = sum(len(v) for k, v in self.labelHistory.items() if k in self.rejectedLabels)
+        total_accepted = sum(count for label, count in labelCounts.items() if label in self.acceptedLabels)
+        total_rejected = sum(count for label, count in labelCounts.items() if label in self.rejectedLabels)
         self.timeHistory.append((now, total_accepted, total_rejected))
 
         # === NEW: Call plotting functions ===
@@ -383,33 +828,41 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         self.summaryVar.set(dict_str)
         self.outputLog  = outputLogTmp
 
-        if self.finished:  # Unlock createOutputStep if finished all jobs
-            outputStep = self._getFirstJoinStep()
-            if outputStep and outputStep.isWaiting():
-                outputStep.setStatus(STATUS_NEW)
+        if not pendingIds:
+            MiffiProtMicrographs._cleanupConsumedResultBatches(self, outputCategorizeFiles + outputCategorizeLogFiles)
 
         self._store()
 
-    def _loadInputSet(self, inputFn):
-        self.debug("Loading input db: %s" % inputFn)
-        inputSet = self._inputClass(filename=inputFn)
+    def _cleanupConsumedResultBatches(self, resultFiles):
+        extraRoot = os.path.abspath(self._getExtraPath()) if hasattr(self, '_getExtraPath') else None
+        batchDirs = {os.path.dirname(path) for path in resultFiles if path}
+        for batchDir in batchDirs:
+            batchDir = os.path.abspath(batchDir)
+            if not re.fullmatch(r'micBatch\d+', os.path.basename(batchDir)):
+                continue
+            if extraRoot is not None and os.path.commonpath([batchDir, extraRoot]) != extraRoot:
+                continue
+            if os.path.isdir(batchDir):
+                shutil.rmtree(batchDir)
+
+    def _loadInputSet(self, _unusedInputIdentity=None):
+        self.debug("Reloading logical input Set.")
+        inputSet = self.inputSet.get()
+        inputSet.close()
+        inputSet.load()
         inputSet.loadAllProperties()
         return inputSet
 
-    def _loadOutputSet(self, SetClass, baseName):
-        setFile = self._getPath(baseName)
-
-        if os.path.exists(setFile):
-            outputSet = SetClass(filename=setFile)
+    def _loadOutputSet(self, outputName, suffix=""):
+        outputSet = getattr(self, outputName, None)
+        if outputSet is not None:
             outputSet.loadAllProperties()
             outputSet.enableAppend()
         else:
-            outputSet = SetClass(filename=setFile)
+            outputSet = self._createSetOfMicrographs(suffix=suffix)
             outputSet.setStreamState(outputSet.STREAM_OPEN)
 
-        inputs = self.inputSet.get()
-        outputSet.copyInfo(inputs)
-
+        outputSet.copyInfo(self.inputSet.get())
         return outputSet
 
     def _insertNewImageSteps(self, newIds, batchSize):
@@ -418,12 +871,19 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
             newIds: input images ids to be processed
         """
         deps = []
+        batchOwnership = getattr(self, '_scheduledInputBatchById', None)
+        if batchOwnership is None:
+            batchOwnership = {}
+            self._scheduledInputBatchById = batchOwnership
+
         # Loop through the image IDs in batches
         for i in range(0, len(newIds), batchSize):
             batchIds = newIds[i:i + batchSize]
             if len(batchIds) == batchSize or self.isStreamClosed:
-                stepId = self._insertFunctionStep(self.miffStep, batchIds, self.counterBatch, needsGPU=True,
-                                              prerequisites=[])
+                batchNumber = self.counterBatch
+                stepId = self._insertFunctionStep(self.miffStep, batchIds, batchNumber, needsGPU=True, prerequisites=[])
+                for imageId in batchIds:
+                    batchOwnership[imageId] = batchNumber
                 self.counterBatch += 1
                 self.insertedIds.extend(batchIds)
                 deps.append(stepId)
@@ -432,41 +892,114 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     def miffStep(self, newIds, counterBatch):
         """ Call miff with the appropriate parameters. """
-        batchDirTmp = self.prepareBatch(newIds, counterBatch)
+        batchDirTmp, preparedIds = self._prepareBatchWithIds(newIds, counterBatch)
+        missingIds = set(newIds).difference(preparedIds)
+
+        if missingIds:
+            resultsLock = getattr(self, '_lock', None)
+            if resultsLock is None:
+                # Lightweight regression harnesses do not instantiate Protocol.
+                resultsLock = self._resultsLock
+
+            with resultsLock:
+                batchOwnership = getattr(self, '_scheduledInputBatchById', None)
+
+                if batchOwnership is None:
+                    # Backwards-compatible path for lightweight harnesses.
+                    releasableMissingIds = set(missingIds)
+                else:
+                    releasableMissingIds = {imageId for imageId in missingIds
+                                             if batchOwnership.get(imageId) == counterBatch}
+
+                self.insertedIds = [imageId for imageId in self.insertedIds if imageId not in releasableMissingIds]
+
+                pendingInputIds = getattr(self, '_pendingInputIds', None)
+                if pendingInputIds is not None:
+                    pendingInputIds.update(releasableMissingIds)
+
+                if batchOwnership is not None:
+                    for imageId in releasableMissingIds:
+                        batchOwnership.pop(imageId, None)
+
         try:
+            if not preparedIds:
+                return
+
             inference_output_file = self.runMiffiInference(batchDirTmp, counterBatch)
-            categorize_output_file, categorize_output_log_file  = self.runMiffiCategorize(counterBatch, inference_output_file)
-            self.outputCategorizeFiles.append(categorize_output_file)
-            self.outputCategorizeLogFiles.append(categorize_output_log_file)
+            categorize_output_file, categorize_output_log_file = self.runMiffiCategorize(counterBatch, inference_output_file)
+
+            resultsLock = getattr(self, '_lock', None)
+            if resultsLock is None:
+                # Lightweight regression harnesses do not instantiate Protocol.
+                resultsLock = self._resultsLock
+
+            with resultsLock:
+                self.outputCategorizeFiles.append(categorize_output_file)
+                self.outputCategorizeLogFiles.append(categorize_output_log_file)
+                self.processedIds.extend(preparedIds)
         except Exception as e:
             self.info('Batch number %d had problems with miffi execution' % counterBatch)
             self.info(e)
-
-        self.processedIds.extend(newIds)
-        # To have a control in the size of the protocol
-        self.deleteBatch(batchDirTmp)
+            raise
+        finally:
+            # To have a control in the size of the protocol
+            self.deleteBatch(batchDirTmp)
 
         if not self.isStreamClosed:
             self.delayRegister()
 
     def prepareBatch(self, newIds, counterBatch):
+        batchDirTmp, _ = self._prepareBatchWithIds(newIds, counterBatch)
+        return batchDirTmp
+
+    def _prepareBatchWithIds(self, newIds, counterBatch):
         batchDirTmp = self._getTmpPath('micBatch%d' % counterBatch)
+        cleanPath(batchDirTmp)
         makePath(batchDirTmp)
-        inputMicSet = self._loadInputSet(self.inputFn)
+        inputMicSet = self._loadInputSet(None)
+        preparedIds = []
+
         for micId in newIds:
-            mic = inputMicSet.getItem("id", micId).clone()
+            # Set.getItem raises rather than returning None for a row
+            # it cannot find, so check membership first - a micId just
+            # discovered via getIdSet() may not be selectable yet under
+            # a PostgreSQL-backed compatibility bridge.
+            mic = None
+            for attempt in range(self.MIC_VISIBILITY_MAX_ATTEMPTS):
+                if attempt > 0:
+                    time.sleep(self.MIC_VISIBILITY_RETRY_DELAY)
+                    inputMicSet = self._loadInputSet(None)
+
+                if micId in inputMicSet:
+                    mic = inputMicSet.getItem("id", micId).clone()
+                    break
+
+            if mic is None:
+                self.error(
+                    "Micrograph with id %d never became visible in the "
+                    "input Set after %d attempts; leaving it pending "
+                    "for a later streaming poll."
+                    % (micId, self.MIC_VISIBILITY_MAX_ATTEMPTS)
+                )
+                continue
+
             micName = mic.getFileName()
             micFnOrig = os.path.abspath(micName)
-            micDest = os.path.join(batchDirTmp, os.path.basename(micName))
+            micDest = os.path.join(
+                batchDirTmp,
+                _getBatchMicName(micId, micName),
+            )
             copyFile(micFnOrig, micDest)
+            preparedIds.append(micId)
 
-        return batchDirTmp
+        return batchDirTmp, preparedIds
 
     def copyMiffiOutput(self, numPass):
         copyTree(self._getTmpPath('output%s' % numPass), self._getExtraPath('MicAssess'))
 
     def runMiffiInference(self, batchDir, numPass):
         outDir = self._getExtraPath('micBatch%d' % numPass)
+        cleanPath(outDir)
         makePath(outDir)
         params = self._getInferenceParams(batchDir, outDir)
         program = Plugin.getProgram('miffi')
@@ -496,22 +1029,37 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
 
     # ------------------------- UTILS functions --------------------------------
     def _getAllDoneIds(self):
-        doneIds = []
+        cache = getattr(self, '_persistedDoneIdsCache', None)
+        if cache is not None:
+            doneIds, acceptedIds, discardedIds = cache
+            return (
+                list(doneIds),
+                len(doneIds),
+                list(acceptedIds),
+                list(discardedIds),
+            )
+
         acceptedIds = []
         discardedIds = []
-        sizeOutput = 0
 
         if hasattr(self, OUTPUT):
-            sizeOutput += self.outputMicrographs.getSize()
+            self.outputMicrographs.loadAllProperties()
             acceptedIds.extend(list(self.outputMicrographs.getIdSet()))
-            doneIds.extend(acceptedIds)
 
         if hasattr(self, OUTPUT_DISCARDED):
-            sizeOutput += self.outputMicrographsDiscarded.getSize()
-            discardedIds.extend(list(self.outputMicrographsDiscarded.getIdSet()))
-            doneIds.extend(discardedIds)
+            self.outputMicrographsDiscarded.loadAllProperties()
+            discardedIds.extend(
+                list(self.outputMicrographsDiscarded.getIdSet())
+            )
 
-        return doneIds, sizeOutput, acceptedIds, discardedIds
+        doneIds = list(acceptedIds) + list(discardedIds)
+        self._persistedDoneIdsCache = (
+            set(doneIds),
+            set(acceptedIds),
+            set(discardedIds),
+        )
+
+        return doneIds, len(doneIds), acceptedIds, discardedIds
 
     def _getInferenceParams(self, batchDir, outDir):
         """ Return the list of args for the command. """
@@ -537,6 +1085,21 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         params = ' '.join(args)
         return params
 
+    def _validate(self):
+        return self._validateParallelProcessing()
+
+    def _validateParallelProcessing(self):
+        # pyworkflow's executor always reserves one thread out of
+        # numberOfThreads for its own bookkeeping, and one more of the
+        # remaining slots is permanently held by the streaming generator
+        # step for the whole run - at least 3 threads are needed to leave
+        # a worker slot free for the miffi batches.
+        if self.numberOfThreads.get() < 3:
+            return ['Please assign at least 3 threads: one is reserved by '
+                    'the executor for its own bookkeeping and another is '
+                    'permanently held by the streaming generator.']
+        return []
+
     def _summary(self):
         summary = []
         summary.append(self.summaryVar.get())
@@ -561,8 +1124,8 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, EMProtocol):
         return self._getExtraPath(TIME_PLOT)
 
     def _plotMiffiLabelHistogram(self):
-        # Compute and sort counts
-        label_counts = {label: len(items) for label, items in self.labelHistory.items()}
+        # labelCounts is bounded by the number of MIFFI categories.
+        label_counts = dict(getattr(self, 'labelCounts', {}))
         sorted_items = sorted(label_counts.items(), key=lambda x: x[1], reverse=True)
         labels = [label for label, _ in sorted_items]
         counts = [count for _, count in sorted_items]
