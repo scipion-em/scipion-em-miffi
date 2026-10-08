@@ -93,6 +93,7 @@ class _StreamingHarness:
         self.inputFn = self.logicalInput.getFileName()
         self._inputClass = _StaleFileBackedSet
         self.streamingBatchSize = _Value(1)
+        self.newDeps = []
         self.insertedIds = [1]
         self.isStreamClosed = False
         self.lastCheck = datetime.now()
@@ -167,6 +168,17 @@ class TestMiffiStreamingRegression(unittest.TestCase):
                 return 1
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._inputSet = _IncrementalInputSet()
                 self.inputSet = _Pointer(self._inputSet)
@@ -248,6 +260,17 @@ class TestMiffiStreamingRegression(unittest.TestCase):
                 return 1
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._inputSet = _ClosedInputSet()
                 self.inputSet = _Pointer(self._inputSet)
@@ -432,6 +455,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return _Image(objId)
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -582,6 +616,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return {1}
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -667,6 +712,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return objId in self.ids
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1, 2]
@@ -791,6 +847,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return objId in self.ids
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1, 2]
@@ -918,6 +985,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     pass
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -1022,6 +1100,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return _Image(objId)
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1, 2]  # id 2 will not be visible
@@ -1156,6 +1245,17 @@ class TestMiffiPendingResultsRegression(unittest.TestCase):
                     return set(self.protocol.durableAcceptedIds)
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -1255,6 +1355,17 @@ class TestMiffiLoadOutputSetRegression(unittest.TestCase):
         inputs = object()
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self.outputMicrographs = existingOutputSet
                 self.inputSet = _Pointer(inputs)
@@ -1433,6 +1544,17 @@ class TestMiffiLogicalInputIdentityRegression(unittest.TestCase):
                 )
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self.inputSet = _Pointer(_Input())
 
@@ -1508,6 +1630,17 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
                     return objId in self.ids
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -1672,6 +1805,17 @@ class TestMiffiSourceRelationFailureRegression(unittest.TestCase):
                     return 301
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [1]
@@ -1775,6 +1919,17 @@ class TestMiffiResumeOutputRelationRegression(unittest.TestCase):
                 return False
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self.inputSet = _Pointer(_Input())
                 # Simulate Resume: the accepted logical output already exists
@@ -1845,6 +2000,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 return {1, 2}
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.outputMicrographs = _Output()
@@ -1897,6 +2063,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 )
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.processedIds = []
@@ -1957,6 +2134,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 return {1}
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.outputMicrographs = _Output()
@@ -2063,6 +2251,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                     return objId in self.ids
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.processedIds = [2]
@@ -2249,6 +2448,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                     return objId in self.ids
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = threading.Lock()
                     self.outputMicrographs = _Output()
@@ -2365,6 +2575,17 @@ class TestMiffiPersistedOutputRefresh(unittest.TestCase):
                 return {1, 2}
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.input = _Input()
@@ -2431,6 +2652,17 @@ class TestMiffiTerminalPersistenceRegression(unittest.TestCase):
                 return objId == 1
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.processedIds = [2]
@@ -2490,6 +2722,17 @@ class TestMiffiTerminalCompletionRegression(unittest.TestCase):
                 return {1, 2}
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._resultsLock = threading.Lock()
                 self.processedIds = []
@@ -2601,6 +2844,17 @@ class TestMiffiUnclassifiedResultRegression(unittest.TestCase):
                     return _Image()
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 def __init__(self):
                     self._resultsLock = (
                         threading.Lock()
@@ -2778,6 +3032,17 @@ class TestMiffiBatchInputIdentityRegression(unittest.TestCase):
                     return self.items[micId]
 
             class _Harness:
+
+                # The stall detector runs inside _checkNewInput now.
+
+                _hasActiveStreamingWork = (
+
+                    MiffiProtMicrographs._hasActiveStreamingWork)
+
+                _recordTerminalProgress = (
+
+                    MiffiProtMicrographs._recordTerminalProgress)
+
                 MIC_VISIBILITY_MAX_ATTEMPTS = 1
                 MIC_VISIBILITY_RETRY_DELAY = 0
 
@@ -3048,6 +3313,17 @@ class TestMiffiContinueRegression(unittest.TestCase):
                 return 1
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self._inputSet = _InputSet()
                 self.inputSet = _Pointer(self._inputSet)
@@ -3109,6 +3385,17 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
         import threading
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self.insertedIds = [7]
                 self._pendingInputIds = set()
@@ -3185,6 +3472,17 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
                 return 1
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             MIC_VISIBILITY_MAX_ATTEMPTS = 1
             MIC_VISIBILITY_RETRY_DELAY = 0
 
@@ -3276,6 +3574,17 @@ class TestMiffiLateVisibilityRetryRegression(unittest.TestCase):
         import threading
 
         class _Harness:
+
+            # The stall detector runs inside _checkNewInput now.
+
+            _hasActiveStreamingWork = (
+
+                MiffiProtMicrographs._hasActiveStreamingWork)
+
+            _recordTerminalProgress = (
+
+                MiffiProtMicrographs._recordTerminalProgress)
+
             def __init__(self):
                 self.insertedIds = [7]
                 self._pendingInputIds = set()
@@ -3400,3 +3709,126 @@ class TestMiffiStreamingGeneratorRegression(unittest.TestCase):
         self.assertEqual(2, protocol._checkNewInput.call_count)
         self.assertEqual(2, len(polls))
         protocol._insertFunctionStep.assert_called_once()
+
+
+class _StuckClosedInput:
+    """A producer that closed declaring more items than it ever shows."""
+
+    def __init__(self, declaredSize=100, visibleIds=None):
+        self._declaredSize = declaredSize
+        self._visibleIds = list(visibleIds if visibleIds is not None
+                                else range(1, 100))
+        self.fullScans = 0
+
+    def getSize(self):
+        return self._declaredSize
+
+    def isStreamClosed(self):
+        return True
+
+    def getUniqueValues(self, attributes, where=None):
+        if where is None:
+            self.fullScans += 1
+            return list(self._visibleIds)
+
+        return []
+
+    def getIdSet(self):
+        return set(self._visibleIds)
+
+    def loadAllProperties(self):
+        pass
+
+    def close(self):
+        pass
+
+
+class _TerminalStallHarness(MiffiProtMicrographs):
+    """Reconciles a closed-but-inconsistent stream, poll after poll."""
+
+    def __init__(self, inputSet, activeWork=False):
+        self._inputSet = inputSet
+        self._inputWatermark = 0
+        self._pendingInputIds = set()
+        self.insertedIds = set()
+        self._activeWork = activeWork
+        self.isStreamClosed = True
+        self.streamingBatchSize = _Value(1)
+        self.newDeps = []
+
+    def _hasActiveStreamingWork(self):
+        return self._activeWork
+
+    def _loadInputSet(self, _):
+        return self._inputSet
+
+    def _getAllDoneIds(self):
+        return [], 0, [], []
+
+    def isContinued(self):
+        return False
+
+    def _insertNewImageSteps(self, *args, **kwargs):
+        return []
+
+    def debug(self, *args):
+        pass
+
+    def info(self, *args):
+        pass
+
+    def poll(self):
+        MiffiProtMicrographs._checkNewInput(self)
+
+
+class TestMiffiTerminalInconsistencyDoesNotHangForever(unittest.TestCase):
+    """A closed producer whose view never becomes consistent must not
+    leave the protocol polling - and rescanning - for the rest of time."""
+
+    def _pollUntilRaises(self, harness, limit=200):
+        for poll in range(limit):
+            try:
+                harness.poll()
+            except RuntimeError as error:
+                return poll + 1, str(error)
+
+        return None, None
+
+    def testAPermanentlyInconsistentViewEventuallyFails(self):
+        harness = _TerminalStallHarness(_StuckClosedInput())
+
+        polls, message = self._pollUntilRaises(harness)
+
+        self.assertIsNotNone(
+            polls,
+            "The producer closed declaring 100 items and only 99 are ever "
+            "visible: polling for that hundredth row never ends, and each "
+            "poll rescans the whole input.",
+        )
+        self.assertIn('99', message)
+        self.assertIn('100', message)
+
+    def testItGivesTheViewSeveralChancesFirst(self):
+        harness = _TerminalStallHarness(_StuckClosedInput())
+
+        polls, _ = self._pollUntilRaises(harness)
+
+        self.assertGreater(polls, 3)
+
+    def testWorkInFlightIsAlsoProgress(self):
+        harness = _TerminalStallHarness(_StuckClosedInput(), activeWork=True)
+
+        polls, _ = self._pollUntilRaises(harness, limit=60)
+
+        self.assertIsNone(
+            polls,
+            "Work was in flight the whole time: that is progress.",
+        )
+
+    def testAConsistentViewIsNeverAffected(self):
+        harness = _TerminalStallHarness(_StuckClosedInput(declaredSize=99))
+
+        for _ in range(50):
+            harness.poll()
+
+        self.assertEqual(harness._terminalStallCount, 0)
