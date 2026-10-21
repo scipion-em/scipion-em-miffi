@@ -354,6 +354,8 @@ class TestMiffiStreamingRegression(unittest.TestCase):
 
 
 class _FailingBatchHarness:
+    _failedMicIds = MiffiProtMicrographs._failedMicIds
+
     def __init__(self):
         self.processedIds = []
         self.outputCategorizeFiles = []
@@ -377,6 +379,9 @@ class _FailingBatchHarness:
     def info(self, message):
         self.messages.append(str(message))
 
+    def error(self, message):
+        self.messages.append(str(message))
+
     def deleteBatch(self, batchDir):
         self.deletedBatches.append(batchDir)
 
@@ -386,14 +391,25 @@ class _FailingBatchHarness:
 
 class TestMiffiBatchFailureRegression(unittest.TestCase):
     def testFailedBatchIsNotReportedAsProcessed(self):
+        # Not raised: the step would fail and take the whole run with it.
         protocol = _FailingBatchHarness()
 
-        with self.assertRaises(RuntimeError):
-            MiffiProtMicrographs.miffStep(protocol, [7, 8], 1)
+        MiffiProtMicrographs.miffStep(protocol, [7, 8], 1)
 
         self.assertEqual(protocol.processedIds, [])
         self.assertEqual(protocol.outputCategorizeFiles, [])
         self.assertEqual(protocol.outputCategorizeLogFiles, [])
+        self.assertEqual({7, 8}, protocol._failedMicIds())
+        self.assertEqual(["/tmp/miffi-failing-batch"], protocol.deletedBatches)
+
+    def testEveryMicrographFailedFailsTheRun(self):
+        protocol = _FailingBatchHarness()
+        protocol._failedMicIds().update({7, 8})
+
+        with self.assertRaisesRegex(Exception, "failed for every one of the 2"):
+            MiffiProtMicrographs._failIfEveryMicrographFailed(protocol, [])
+
+        MiffiProtMicrographs._failIfEveryMicrographFailed(protocol, [9])
 
 
 

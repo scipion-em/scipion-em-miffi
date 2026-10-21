@@ -528,7 +528,10 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 if len(inputIds) == inputSet.getSize():
                     self._closedInputIdsCache = set(inputIds)
 
-            self.finished = set(doneListIds) == inputIds
+            failedIds = MiffiProtMicrographs._failedMicIds(self)
+            self.finished = (set(doneListIds) | failedIds) == inputIds
+            if self.finished:
+                MiffiProtMicrographs._failIfEveryMicrographFailed(self, doneListIds)
         else:
             self.finished = False
 
@@ -786,7 +789,9 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
         # scratch instead of replaying the same unusable result files.
         pendingIds = set(newDone).difference(persistedDoneIds).difference(unclassifiedIds)
 
-        self.finished = self.isStreamClosed and set(persistedDoneIds) == inputIds
+        self.finished = self.isStreamClosed and (
+            set(persistedDoneIds)
+            | MiffiProtMicrographs._failedMicIds(self)) == inputIds
 
         if pendingIds:
             requeuePendingResults()
@@ -832,6 +837,20 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
             MiffiProtMicrographs._cleanupConsumedResultBatches(self, outputCategorizeFiles + outputCategorizeLogFiles)
 
         self._store()
+
+    def _failedMicIds(self):
+        """Micrographs of this run whose batch failed: in no output."""
+        return self.__dict__.setdefault('_failedMicIdsSet', set())
+
+    def _failIfEveryMicrographFailed(self, doneIds):
+        """A failed micrograph is left out; the run fails only when that
+        happened to every micrograph."""
+        failedIds = MiffiProtMicrographs._failedMicIds(self)
+
+        if failedIds and not doneIds:
+            raise Exception("Miffi failed for every one of the %d "
+                            "micrographs; see the errors above. Continue "
+                            "assesses them again." % len(failedIds))
 
     def _cleanupConsumedResultBatches(self, resultFiles):
         extraRoot = os.path.abspath(self._getExtraPath()) if hasattr(self, '_getExtraPath') else None
@@ -938,9 +957,12 @@ class MiffiProtMicrographs(ProtPreprocessMicrographs, ProtStreamingBase):
                 self.outputCategorizeLogFiles.append(categorize_output_log_file)
                 self.processedIds.extend(preparedIds)
         except Exception as e:
-            self.info('Batch number %d had problems with miffi execution' % counterBatch)
-            self.info(e)
-            raise
+            # Not raised: the step would fail and take the whole run with
+            # it. Its micrographs are left out, and Continue assesses them
+            # again.
+            self.error('Batch number %d had problems with miffi execution: %s'
+                       % (counterBatch, e))
+            MiffiProtMicrographs._failedMicIds(self).update(preparedIds)
         finally:
             # To have a control in the size of the protocol
             self.deleteBatch(batchDirTmp)
