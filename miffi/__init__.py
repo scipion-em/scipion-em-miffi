@@ -30,7 +30,7 @@ import os
 
 from miffi.constants import *
 
-__version__ = "1.1.0"  # plugin version
+__version__ = "1.2.0"  # plugin version
 
 from pyworkflow import SPA
 

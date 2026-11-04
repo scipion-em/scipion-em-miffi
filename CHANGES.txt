@@ -1,3 +1,20 @@
+v1.2.0:
+    users:
+        - Streaming is reliable: Continue/Resume picks up where the run stopped, without losing, repeating or reclassifying micrographs
+        - A failed batch no longer fails the whole run: its micrographs are left out, Continue retries them, and the run fails only if every micrograph failed
+        - The run no longer keeps rescanning its input forever when the input set never settles
+        - Micrographs that become visible late (e.g. on a network disk) are retried instead of skipped
+        - Micrographs with the same file name in different folders no longer collide in a batch
+        - The protocol now needs at least 3 threads (default 3): one for the executor, one for the streaming generator and at least one for the miffi batches
+        - Label statistics use bounded memory on long sessions, and consumed temporary batch files are cleaned up
+        - Plugin category set to SPA
+    developers:
+        - Migrated to ProtStreamingBase (stepsGeneratorStep) with an input watermark, pending ids and terminal reconciliation of the input
+        - Outputs are reused across resumes and their persistence is checked incrementally; source relations are retried idempotently after a failure
+        - Batch ownership is durable and pruned, so stale batch workers cannot overwrite retried batches
+        - No Set.getFileName() backing-file identity for the input: the logical set is used (works with the ScipionWeb runtime and classic Scipion)
+        - New regression suite miffi/tests/test_streaming_regression.py (49 tests)
+
 v1.1.0:
     users:
         - Enable the option of plugin --noBin installation and link the conda env and the models to the plugin
